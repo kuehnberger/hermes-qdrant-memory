@@ -40,9 +40,16 @@ session.
   | package | constraint | why |
   |---|---|---|
   | `qdrant-client` | `>=1.10.0,<2` | 1.10.0 is the oldest floor with `query_points` / `Prefetch` / `FusionQuery` |
-  | `sentence-transformers` | `>=2.7.0,<7` | local embeddings |
+  | `sentence-transformers` | `>=2.7.0,<7` | local embeddings — **heavy**, see below |
 
-  `torch` comes in transitively and is intentionally not pinned here.
+`torch` comes in transitively and is intentionally not pinned here.
+
+> **Size warning.** `sentence-transformers` is the heavy dependency: it pulls
+> `torch`, which is roughly 600 MB of RSS and several hundred MB on disk. The
+> wide `>=2.7.0,<7` span is deliberate — a tight pin would freeze users onto an
+> old dependency and miss upstream security fixes. If you only intend to use a
+> remote Qdrant endpoint, you can skip the local embedder entirely; see the
+> `embedder` config key above.
 
 ## Setup
 
