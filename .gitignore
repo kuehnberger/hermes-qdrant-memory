@@ -1,0 +1,9 @@
+# Runtime state written by save_config() (hermes memory setup / dashboard).
+# Per-user, never committed — it may carry a Qdrant API key.
+config.json
+
+# Python / tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/

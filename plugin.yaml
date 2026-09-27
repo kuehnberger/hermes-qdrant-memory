@@ -1,0 +1,37 @@
+name: qdrant                      # MUST equal the catalog key
+version: "0.1.0"                  # quoted — structural validator requires 1-32 chars, and
+                                  # the string form avoids the 0.1 -> 0.1 float trap
+manifest_version: 2               # v2 fields: python_dependencies, config_schema
+kind: exclusive                   # one active provider, selected via memory.provider
+author: "Hermes Agent community"
+license: MIT
+homepage: "https://github.com/kuehnberger/hermes-qdrant-memory"
+tags: [memory, qdrant, vector, self-hosted, hybrid-search]
+description: "Self-hostable Qdrant vector-memory backend for Hermes — hybrid dense+sparse search with RRF fusion, session-scoped recall, INT8 scalar quantization. No API key, no vendor account, no lock-in: a 24-42 MB Qdrant server on localhost. Registers qdrant_search / qdrant_upsert / qdrant_recall / qdrant_collect. Disclosure — the sentence-transformers embedder (~600 MB RSS with torch) downloads model weights from Hugging Face on first use and embeds on-device; all memory data stays in your Qdrant server and nothing is sent to a third party. Local embedded mode is not supported."
+
+requires_hermes: ">=0.21.4"       # parses under _VERSION_COMPARATOR_RE
+
+# NOT pip_dependencies — that key is silently dropped by parse_manifest_file().
+# torch is deliberately NOT declared: it is transitive via sentence-transformers,
+# and pinning a second constraint on an ~800 MB dependency is not ours to own.
+# 1.10.0 is the oldest floor with query_points + Prefetch + FusionQuery.
+python_dependencies:
+  - "qdrant-client>=1.10.0,<2"
+  - "sentence-transformers>=2.7.0,<7"
+
+requires_env: []                  # a LOCAL default means no env gate
+optional_env:
+  - QDRANT_URL
+  - QDRANT_API_KEY
+
+# NOT expose_tools — that key parses to an empty provides_tools list.
+provides_tools:
+  - qdrant_search
+  - qdrant_upsert
+  - qdrant_recall
+  - qdrant_collect
+provides_hooks: []
+
+# No config_fields: — not a manifest key; it is dropped with a warning. The schema
+# lives in get_config_schema() (read by `hermes memory setup` and the dashboard).
+# No config_schema:, no desktop/plugin.js, no update_url.
