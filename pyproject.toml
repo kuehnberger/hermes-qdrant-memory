@@ -23,16 +23,14 @@ dependencies = [
     "qdrant-client>=1.10.0,<2",
     # Both embedder backends ship. fastembed (ONNX Runtime, CPU-only) is the
     # default: measured 287 MB peak RSS against sentence-transformers'
-    # 2,191 MB, and 0.01 s vs 18.24 s to first embed. sentence-transformers
-    # remains a first-class, configurable option because it is materially
-    # faster on a machine with a GPU. The plugin only calls
-    # SentenceTransformer(...).encode(...), stable since 2.x.
+    # 2,191 MB, and 0.01 s vs 18.24 s to first embed. ST stays a first-class
+    # option because it is materially faster on a GPU host. The plugin only
+    # calls SentenceTransformer(...).encode(...), stable since 2.x.
     "fastembed>=0.4.0",
     "sentence-transformers>=2.7.0,<7",
-    # torch is intentionally NOT declared: it is transitive via
-    # sentence-transformers, and pinning a second constraint on that ~5.3 GB
-    # dependency (1.2 GB torch + 3.2 GB CUDA wheels + 895 MB triton for a
-    # CUDA build) is not ours to own.
+    # torch is NOT declared: it is transitive via sentence-transformers, and
+    # ~5.3 GB in a CUDA build is not ours to pin. Runtime installs may drop
+    # it outright; keep it in the dev venv, the parity tests need it.
 ]
 
 [dependency-groups]
