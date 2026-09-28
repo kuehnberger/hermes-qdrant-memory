@@ -6,18 +6,19 @@ kind: exclusive                   # one active provider, selected via memory.pro
 author: "Hermes Agent community"
 license: MIT
 homepage: "https://github.com/kuehnberger/hermes-qdrant-memory"
-tags: [memory, qdrant, vector, self-hosted, hybrid-search]
-description: "Self-hostable Qdrant vector-memory backend for Hermes — hybrid dense+sparse search with RRF fusion, session-scoped recall, INT8 scalar quantization. No API key, no vendor account, no lock-in: a 24-42 MB Qdrant server on localhost. Registers qdrant_search / qdrant_upsert / qdrant_recall / qdrant_collect. Disclosure — the sentence-transformers embedder (~600 MB RSS with torch) downloads model weights from Hugging Face on first use and embeds on-device; all memory data stays in your Qdrant server and nothing is sent to a third party. Local embedded mode is not supported."
+tags: [memory, qdrant, vector, self-hosted]
+description: "Self-hostable Qdrant vector-memory backend for Hermes — semantic search over a local Qdrant server, session-scoped recall, no API key, no vendor account, no lock-in: a 24-42 MB Qdrant server on localhost. Registers qdrant_search / qdrant_upsert / qdrant_recall / qdrant_collect / qdrant_prepare. Embedding is local and on-device (fastembed by default, ~290 MB RSS, no torch required; sentence-transformers selectable for GPU hosts) and downloads model weights from Hugging Face on first use — all memory data stays in your Qdrant server and nothing is sent to a third party. Local embedded mode is not supported; hybrid dense+sparse RRF search and INT8 quantization are not implemented."
 
 requires_hermes: ">=0.21.4"       # parses under _VERSION_COMPARATOR_RE
 
 # NOT pip_dependencies — that key is silently dropped by parse_manifest_file().
 # BOTH embedder backends are declared, not just the default. 'fastembed' (ONNX
-# Runtime, CPU-only) is the default because it measured 291 MB peak RSS against
+# Runtime, CPU-only) is the default because it measured 287 MB peak RSS against
 # sentence-transformers' 2,191 MB; 'sentence-transformers' stays a supported,
 # configurable option for machines with a GPU or RAM to spare. torch itself is
 # deliberately NOT declared: it is transitive via sentence-transformers, and
-# pinning a second constraint on that ~800 MB dependency is not ours to own.
+# ~5.3 GB in a CUDA build is not ours to pin. Keep torch in a dev venv — the
+# backend-parity tests need it; a runtime venv may drop it entirely.
 # 1.10.0 is the oldest floor with query_points + Prefetch + FusionQuery.
 python_dependencies:
   - "qdrant-client>=1.10.0,<2"
