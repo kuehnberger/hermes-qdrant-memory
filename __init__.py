@@ -27,53 +27,37 @@ from typing import Any
 
 from agent.memory_provider import MemoryProvider, RecallStatus
 
-# ``embedder`` is a sibling module, but this package is loaded two ways: as
-# ``plugins.memory.qdrant`` (normal, relative import works) and as a bare
-# top-level ``__init__`` (how the Hermes plugin loader and these tests import
-# it), where a relative import has no parent package and raises ImportError.
-# Try the relative form first, then fall back to loading the sibling by path.
+# ``embedder`` is a sibling module, but this package loads two ways: as
+# ``plugins.memory.qdrant`` (relative import works) and as a bare top-level
+# ``__init__`` (how the Hermes plugin loader and these tests import it), where a
+# relative import has no parent package and raises ImportError. Load it by path
+# in that case. Module-object binding rather than a name list, so the re-export
+# block below stays a one-liner per name instead of duplicating the list twice.
 try:  # pragma: no cover - branch depends on how the package was imported
-    from .embedder import (
-        BACKEND_FASTEMBED,
-        BACKEND_ST,
-        BACKENDS,
-        DEFAULT_MODEL,
-        Embedder,
-        EmbeddingConfigError,
-        EmbeddingError,
-        EmbeddingRuntimeError,
-        model_cache_dir,
-        model_is_present,
-    )
+    from . import embedder as _embedder
 except ImportError:  # pragma: no cover
-    import importlib.util as _ilu
-    import os as _os
+    import importlib.util
+    import os
 
-    _spec = _ilu.spec_from_file_location(
+    _spec = importlib.util.spec_from_file_location(
         "hermes_qdrant_embedder",
-        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "embedder.py"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "embedder.py"),
     )
-    if _spec is None or _spec.loader is None:  # pragma: no cover
+    if _spec is None or _spec.loader is None:
         raise ImportError("cannot locate sibling embedder.py")
-    _embedder_mod = _ilu.module_from_spec(_spec)
-    _spec.loader.exec_module(_embedder_mod)
-    BACKEND_FASTEMBED = _embedder_mod.BACKEND_FASTEMBED
-    BACKEND_ST = _embedder_mod.BACKEND_ST
-    BACKENDS = _embedder_mod.BACKENDS
-    DEFAULT_MODEL = _embedder_mod.DEFAULT_MODEL
-    Embedder = _embedder_mod.Embedder
-    EmbeddingConfigError = _embedder_mod.EmbeddingConfigError
-    EmbeddingError = _embedder_mod.EmbeddingError
-    EmbeddingRuntimeError = _embedder_mod.EmbeddingRuntimeError
-    model_cache_dir = _embedder_mod.model_cache_dir
-    model_is_present = _embedder_mod.model_is_present
+    _embedder = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_embedder)
 
-# Re-exported for callers and tests.
-__all_embedder_api__ = (
-    "BACKEND_FASTEMBED", "BACKEND_ST", "BACKENDS", "DEFAULT_MODEL",
-    "Embedder", "EmbeddingConfigError", "EmbeddingError",
-    "EmbeddingRuntimeError", "model_cache_dir", "model_is_present",
-)
+Embedder = _embedder.Embedder
+EmbeddingError = _embedder.EmbeddingError
+EmbeddingConfigError = _embedder.EmbeddingConfigError
+EmbeddingRuntimeError = _embedder.EmbeddingRuntimeError
+BACKEND_FASTEMBED = _embedder.BACKEND_FASTEMBED
+BACKEND_ST = _embedder.BACKEND_ST
+BACKENDS = _embedder.BACKENDS
+DEFAULT_MODEL = _embedder.DEFAULT_MODEL
+model_cache_dir = _embedder.model_cache_dir
+model_is_present = _embedder.model_is_present
 
 logger = logging.getLogger("hermes.plugins.memory.qdrant")
 
