@@ -748,3 +748,123 @@ class TestModelPresence:
         assert "not found" not in out.lower(), (
             f"qdrant_prepare claims the model is absent but it is cached: {out}"
         )
+
+
+class TestStoredVectorParity:
+    """A fresh embedding must match vectors ALREADY IN the collection.
+
+    TestEmbedderParity proves the two backends agree with each other. That is
+    necessary but not sufficient: what actually matters on this host is whether
+    the 127k vectors written by the old torch path are still *correct* under the
+    new fastembed backend. Only a comparison against a stored vector can show
+    that, and it is the claim the README makes when it says no re-embedding is
+    needed.
+
+    The evidence so far lived in a one-off script outside the repo, which means
+    CI could not protect it. This is that check, in the suite.
+
+    Uses a dedicated throwaway collection so a run never touches
+    hermes_memories, and writes vectors through the SENTENCE-TRANSFORMERS path
+    (torch) so the comparison is genuinely old-path vs new-path rather than
+    fastembed compared with itself.
+    """
+
+    COLLECTION = "hermes_parity_probe"
+    PROBES = [
+        "The capital of Austria is Vienna.",
+        "Retrieval augmented generation grounds answers in a vector store.",
+    ]
+
+    def _cos(self, a, b):
+        dot = sum(x * y for x, y in zip(a, b))
+        na = sum(x * x for x in a) ** 0.5
+        nb = sum(x * x for x in b) ** 0.5
+        return dot / (na * nb) if na and nb else 0.0
+
+    def _client(self, url):
+        from qdrant_client import QdrantClient
+        return QdrantClient(url=url, prefer_grpc=False, timeout=10)
+
+    def test_new_backend_reproduces_stored_vectors(self, live_qdrant):
+        """fastembed(text) must match the stored torch-era vector for that text."""
+        import uuid
+
+        import pytest as _pytest
+        st = _pytest.importorskip(
+            "sentence_transformers", reason="needs torch to write the old-path vector")
+        from qdrant_client import models
+
+        from plugins.memory.qdrant import DEFAULT_MODEL
+
+        client = self._client(live_qdrant)
+        try:
+            if client.collection_exists(self.COLLECTION):
+                client.delete_collection(self.COLLECTION)
+            client.create_collection(
+                collection_name=self.COLLECTION,
+                vectors_config=models.VectorParams(
+                    size=384, distance=models.Distance.COSINE),
+            )
+
+            # 1. Write with the OLD path (torch / sentence-transformers).
+            old = st.SentenceTransformer("all-MiniLM-L6-v2")
+            stored = {}
+            for i, text in enumerate(self.PROBES):
+                vec = old.encode(text, normalize_embeddings=True).tolist()
+                stored[text] = vec
+                client.upsert(
+                    collection_name=self.COLLECTION,
+                    points=[models.PointStruct(
+                        id=str(uuid.uuid4()), vector=vec,
+                        payload={"text": text, "idx": i})],
+                )
+
+            # 2. Re-embed each probe with the NEW default backend and compare.
+            from plugins.memory.qdrant import QdrantMemoryProvider
+            p = QdrantMemoryProvider.__new__(QdrantMemoryProvider)
+            p._embedder = "fastembed"
+            p._model = DEFAULT_MODEL
+            p._device = "auto"
+            p._embedder_impl = None
+
+            for text in self.PROBES:
+                fresh = p._embed(text)
+                cos = self._cos(fresh, stored[text])
+                assert cos > 0.999, (
+                    f"new backend diverges from a STORED vector for {text!r}: "
+                    f"cosine={cos:.6f}. Existing points are in a different vector "
+                    "space — the collection must be re-embedded."
+                )
+
+            # 3. The reverse direction matters too: can the new backend RETRIEVE
+            # the old vector by text? Cosine alone proves the maths; a real
+            # query proves the runtime path the provider uses.
+            hits = client.query_points(
+                collection_name=self.COLLECTION,
+                query=p._embed(self.PROBES[0]),
+                using="",
+                limit=len(self.PROBES),
+            ).points
+            texts = [(h.payload or {}).get("text") for h in hits]
+            assert self.PROBES[0] == texts[0], (
+                f"top hit for its own text was {texts[0]!r}, not {self.PROBES[0]!r} "
+                f"— the stored vectors are not retrievable under this backend"
+            )
+        finally:
+            try:
+                if client.collection_exists(self.COLLECTION):
+                    client.delete_collection(self.COLLECTION)
+            except Exception:
+                pass
+            client.close()
+
+    def test_probe_collection_is_cleaned_up(self, live_qdrant):
+        """The parity probe must not leave a collection behind."""
+        client = self._client(live_qdrant)
+        try:
+            assert not client.collection_exists(self.COLLECTION), (
+                f"{self.COLLECTION} survived a test run — the test is leaking a "
+                "collection into the live server"
+            )
+        finally:
+            client.close()
