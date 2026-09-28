@@ -63,6 +63,21 @@ session.
 > (`uv pip install torch`, or `torch --index-url .../cu124` for the CUDA build)
 > rather than to debug the plugin.
 
+> **Keep torch in your development/test venv — do not remove it.** A runtime
+> install is well served by dropping torch entirely (the default `fastembed`
+> backend never imports it, and neither does the plugin at import time). A
+> *development* venv is not: the test suite exercises the `sentence-transformers`
+> backend on purpose, both to prove vector parity with the stored collection and
+> to prove that selecting it fails loudly when torch is absent. Without torch in
+> the dev venv those tests either skip or pass vacuously, and the guarantee
+> that a backend swap needs no re-embedding loses its only guard.
+>
+> Practically: keep torch in whichever venv runs `pytest` (here the 3.11 dev
+> venv, with a CPU-only build), and omit it from the venv the gateway serves
+> from. The plugin's own imports are backend-agnostic — neither `transformers`
+> nor `torch` is loaded by `import`ing the plugin or by taking the `fastembed`
+> path, so a torch-free runtime produces no warnings on its own.
+
 ## Setup
 
 ```bash
