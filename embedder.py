@@ -89,12 +89,25 @@ class EmbeddingRuntimeError(EmbeddingError):
 # ---------------------------------------------------------------------------
 
 def _cache_roots() -> list[Path]:
-    """Directories a model may already be cached in, most specific first."""
+    """Directories a model may already be cached in, most specific first.
+
+    Order matters only for reporting which cache was hit. The important part is
+    that this covers fastembed's ACTUAL default, which is not the XDG location:
+    fastembed falls back to ``tempfile.gettempdir()/fastembed_cache``. Hermes
+    points TMPDIR at ~/.hermes/cache/scratch, so on this host the model lives at
+    ``~/.hermes/cache/scratch/fastembed_cache`` and a check that only looked at
+    ~/.cache/fastembed wrongly reported a working model as missing.
+    """
     roots: list[Path] = []
 
     fe_env = os.environ.get("FASTEMBED_CACHE_PATH")
     if fe_env:
         roots.append(Path(fe_env))
+
+    # fastembed's own default: $TMPDIR/fastembed_cache.
+    import tempfile
+
+    roots.append(Path(tempfile.gettempdir()) / "fastembed_cache")
 
     hf_home = os.environ.get("HF_HOME")
     if hf_home:
