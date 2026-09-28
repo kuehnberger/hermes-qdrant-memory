@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from plugins.memory.qdrant import EmbeddingError
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -304,7 +306,8 @@ class TestQdrantConfigSchemaContract:
         from hermes_cli.web_server_memory import _normalize_memory_provider_schema
         fields = _normalize_memory_provider_schema("qdrant", qdrant_provider)
         assert {f["key"] for f in fields} == {
-            "url", "api_key", "collection", "vector_size", "distance", "embedder"}
+            "url", "api_key", "collection", "vector_size", "distance",
+            "embedder", "model", "device"}
 
     def test_secret_field_declares_env_var(self, qdrant_provider):
         """Secrets route to .env through the field's env_var, not a config key."""
@@ -458,3 +461,214 @@ class TestQdrantBackendConnectivity:
         b.connect()
         cols = b.list_collections()
         assert isinstance(cols, list)
+
+# ---------------------------------------------------------------------------
+# Embedder contract
+# ---------------------------------------------------------------------------
+
+class TestEmbedderContract:
+    """The embedder must never fail silently.
+
+    Regression this class exists to prevent: the old ``_embed()`` caught every
+    exception, logged at DEBUG, and returned ``None``. At default log level the
+    user saw nothing, the write was skipped, and the session reported memory
+    saved when nothing had been encoded. A wrong-but-valid default model is the
+    same failure in disguise — it loads fine and quietly writes the wrong space.
+    """
+
+    def test_embed_returns_a_vector_not_none(self, qdrant_provider):
+        vec = qdrant_provider._embed("hello world")
+        assert isinstance(vec, list) and vec
+        assert all(isinstance(x, float) for x in vec)
+
+    def test_embed_never_returns_none(self, qdrant_provider):
+        """Any failure must raise, so a falsy result can never mean 'failed'."""
+        try:
+            result = qdrant_provider._embed("probe string for a real vector")
+        except EmbeddingError:
+            return  # raising is the correct outcome
+        assert result is not None
+        assert len(result) == qdrant_provider._vector_size
+
+    def test_unknown_backend_raises_config_error(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from plugins.memory.qdrant import (
+            Embedder, EmbeddingConfigError, EmbeddingError,
+        )
+        with pytest.raises(EmbeddingConfigError):
+            Embedder(backend="not-a-real-backend", model="whatever")
+        assert issubclass(EmbeddingConfigError, EmbeddingError)
+
+    def test_empty_model_name_raises_rather_than_defaulting(self):
+        """A blank model must NOT fall back to a library default.
+
+        fastembed's own default is BAAI/bge-small-en-v1.5, not MiniLM, so a
+        blank name here would silently produce a different vector space.
+        """
+        from plugins.memory.qdrant import Embedder, EmbeddingConfigError
+        for blank in ("", "   ", None):
+            with pytest.raises(EmbeddingConfigError):
+                Embedder(backend="fastembed", model=blank or "")
+
+    def test_model_default_is_pinned_to_minilm(self, qdrant_provider):
+        from plugins.memory.qdrant import DEFAULT_MODEL
+        assert DEFAULT_MODEL == "sentence-transformers/all-MiniLM-L6-v2"
+        assert qdrant_provider._model == DEFAULT_MODEL
+        assert qdrant_provider._embedder == "fastembed"
+
+    def test_bad_model_raises_on_encode(self, qdrant_provider):
+        """A nonexistent model is deterministic — it must raise, not return None."""
+        from plugins.memory.qdrant import EmbeddingError
+        qdrant_provider._model = "definitely/not-a-real-model-xyz"
+        qdrant_provider._embedder_impl = None
+        with pytest.raises(EmbeddingError):
+            qdrant_provider._embed("some text")
+
+    def test_configured_knobs_reach_the_embedder(self, tmp_path, monkeypatch):
+        from plugins.memory.qdrant import QdrantMemoryProvider
+        p = QdrantMemoryProvider({
+            "embedder": "sentence-transformers",
+            "model": "sentence-transformers/all-MiniLM-L6-v2",
+            "device": "cpu",
+        })
+        e = p.get_embedder()
+        assert e.backend == "sentence-transformers"
+        assert e.model == "sentence-transformers/all-MiniLM-L6-v2"
+        assert e.device == "cpu"
+
+    def test_embed_error_surfaces_in_unavailable_reason(self, qdrant_provider):
+        """A broken embedder must make /status red even with a healthy server."""
+        qdrant_provider._embed_error = "embedder misconfigured: model=X"
+        assert "model=X" in qdrant_provider.unavailable_reason()
+
+    def test_schema_exposes_both_backends(self, qdrant_provider):
+        fields = {f["key"]: f for f in qdrant_provider.get_config_schema()}
+        assert "model" in fields and "device" in fields
+        assert fields["embedder"]["choices"] == ["fastembed", "sentence-transformers"]
+        assert fields["embedder"]["default"] == "fastembed"
+
+    def test_prepare_tool_is_declared_and_dispatched(self, qdrant_provider):
+        names = {t["name"] for t in qdrant_provider.get_tool_schemas()}
+        assert "qdrant_prepare" in names
+        out = qdrant_provider.handle_tool_call("qdrant_prepare", {})
+        assert isinstance(out, str) and out.strip()
+
+    def test_validate_vector_spec_names_both_values_on_mismatch(self, qdrant_provider):
+        qdrant_provider._vector_size = 768  # model produces 384
+        issues = qdrant_provider.validate_vector_spec()
+        joined = " ".join(issues)
+        assert issues
+        assert "768" in joined and "384" in joined
+
+    def test_validate_vector_spec_flags_non_cosine(self, qdrant_provider):
+        qdrant_provider._distance = "Dot"
+        joined = " ".join(qdrant_provider.validate_vector_spec())
+        assert "Dot" in joined and "Cosine" in joined
+
+
+# ---------------------------------------------------------------------------
+# Embedder parity — the guard against a silent model swap
+# ---------------------------------------------------------------------------
+
+class TestEmbedderParity:
+    """A runtime swap must not change the vector space.
+
+    The two backends are numerically interchangeable for the same checkpoint
+    (measured cosine 1.0000000162, max component diff 9.4e-08 on
+    all-MiniLM-L6-v2). That is the whole reason no re-ingest is required, so it
+    is asserted rather than assumed: a future model-name typo fails here loudly
+    instead of degrading recall with no signal anywhere.
+    """
+
+    PROBES = [
+        "The capital of Austria is Vienna.",
+        "Vienna is the capital city of Austria.",
+        "Machine learning models learn patterns from data.",
+    ]
+
+    def _cos(self, a, b):
+        dot = sum(x * y for x, y in zip(a, b))
+        na = sum(x * x for x in a) ** 0.5
+        nb = sum(x * x for x in b) ** 0.5
+        return dot / (na * nb) if na and nb else 0.0
+
+    @pytest.fixture(autouse=True)
+    def _require_both_backends(self):
+        fe = pytest.importorskip("fastembed", reason="fastembed not installed")
+        st = pytest.importorskip(
+            "sentence_transformers", reason="sentence-transformers not installed"
+        )
+        self._fe, self._st = fe, st
+
+    def test_backends_agree_on_the_same_model(self):
+        from plugins.memory.qdrant import DEFAULT_MODEL
+        fe = self._fe.TextEmbedding(model_name=DEFAULT_MODEL)
+        st = self._st.SentenceTransformer("all-MiniLM-L6-v2")
+        for text in self.PROBES:
+            a = next(iter(fe.passage_embed([text]))).tolist()
+            b = st.encode(text, normalize_embeddings=True).tolist()
+            assert self._cos(a, b) > 0.999, (
+                f"backend divergence on {text!r}: cosine={self._cos(a, b):.6f}. "
+                "The ONNX and torch paths no longer agree — stored vectors would "
+                "be wrong."
+            )
+
+    def test_dimensions_match(self):
+        from plugins.memory.qdrant import DEFAULT_MODEL
+        fe = self._fe.TextEmbedding(model_name=DEFAULT_MODEL)
+        st = self._st.SentenceTransformer("all-MiniLM-L6-v2")
+        a = next(iter(fe.passage_embed(["dimension probe"]))).tolist()
+        b = st.encode("dimension probe", normalize_embeddings=True).tolist()
+        assert len(a) == len(b) == 384
+
+
+@pytest.mark.allow_real_home_io
+class TestEmbedderParityLive:
+    """The decisive check: a fresh embed must match a REAL stored vector.
+
+    Comparing the two backends to each other only proves they agree; comparing
+    a fresh embed to what is already in the collection proves the live data is
+    still readable. Skips when no Qdrant is listening.
+    """
+
+    PROBE_TEXTS = ["Hey! How can I help you today?"]
+
+    def _cos(self, a, b):
+        dot = sum(x * y for x, y in zip(a, b))
+        na = sum(x * x for x in a) ** 0.5
+        nb = sum(x * x for x in b) ** 0.5
+        return dot / (na * nb) if na and nb else 0.0
+
+    def test_fresh_embed_matches_stored_vectors(self, live_qdrant):
+        import requests
+        from plugins.memory.qdrant import QdrantMemoryProvider
+        p = QdrantMemoryProvider({"url": live_qdrant})
+        # Find a real point whose text we can recompute.
+        resp = requests.post(
+            f"{live_qdrant}/collections/hermes_memories/points/scroll",
+            json={"limit": 25, "with_payload": True, "with_vector": True},
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            pytest.skip("could not scroll the live collection")
+        points = resp.json().get("result", {}).get("points", [])
+        checked = 0
+        for pt in points:
+            text = (pt.get("payload") or {}).get("text")
+            vec = pt.get("vector")
+            if isinstance(vec, dict):
+                vec = vec.get("dense")
+            if not isinstance(text, str) or not text.strip() or not vec:
+                continue
+            mine = p._embed(text)
+            cos = self._cos(mine, vec)
+            assert cos > 0.999, (
+                f"fresh embed disagrees with stored vector (cosine={cos:.6f}) "
+                f"for id={pt.get('id')} — the collection was written by a "
+                "different embedding space."
+            )
+            checked += 1
+            if checked >= 3:
+                break
+        if not checked:
+            pytest.skip("no suitable stored points found to compare")

@@ -27,6 +27,54 @@ from typing import Any
 
 from agent.memory_provider import MemoryProvider, RecallStatus
 
+# ``embedder`` is a sibling module, but this package is loaded two ways: as
+# ``plugins.memory.qdrant`` (normal, relative import works) and as a bare
+# top-level ``__init__`` (how the Hermes plugin loader and these tests import
+# it), where a relative import has no parent package and raises ImportError.
+# Try the relative form first, then fall back to loading the sibling by path.
+try:  # pragma: no cover - branch depends on how the package was imported
+    from .embedder import (
+        BACKEND_FASTEMBED,
+        BACKEND_ST,
+        BACKENDS,
+        DEFAULT_MODEL,
+        Embedder,
+        EmbeddingConfigError,
+        EmbeddingError,
+        EmbeddingRuntimeError,
+        model_cache_dir,
+        model_is_present,
+    )
+except ImportError:  # pragma: no cover
+    import importlib.util as _ilu
+    import os as _os
+
+    _spec = _ilu.spec_from_file_location(
+        "hermes_qdrant_embedder",
+        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "embedder.py"),
+    )
+    if _spec is None or _spec.loader is None:  # pragma: no cover
+        raise ImportError("cannot locate sibling embedder.py")
+    _embedder_mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_embedder_mod)
+    BACKEND_FASTEMBED = _embedder_mod.BACKEND_FASTEMBED
+    BACKEND_ST = _embedder_mod.BACKEND_ST
+    BACKENDS = _embedder_mod.BACKENDS
+    DEFAULT_MODEL = _embedder_mod.DEFAULT_MODEL
+    Embedder = _embedder_mod.Embedder
+    EmbeddingConfigError = _embedder_mod.EmbeddingConfigError
+    EmbeddingError = _embedder_mod.EmbeddingError
+    EmbeddingRuntimeError = _embedder_mod.EmbeddingRuntimeError
+    model_cache_dir = _embedder_mod.model_cache_dir
+    model_is_present = _embedder_mod.model_is_present
+
+# Re-exported for callers and tests.
+__all_embedder_api__ = (
+    "BACKEND_FASTEMBED", "BACKEND_ST", "BACKENDS", "DEFAULT_MODEL",
+    "Embedder", "EmbeddingConfigError", "EmbeddingError",
+    "EmbeddingRuntimeError", "model_cache_dir", "model_is_present",
+)
+
 logger = logging.getLogger("hermes.plugins.memory.qdrant")
 
 # ---------------------------------------------------------------------------
@@ -154,7 +202,14 @@ class QdrantMemoryProvider(MemoryProvider):
         self._distance = self._config.get("distance", "Cosine")
         self._url = self._config.get("url", "http://localhost:6333")
         self._api_key = self._config.get("api_key", "")
-        self._embedder = self._config.get("embedder", None)
+        self._embedder = self._config.get("embedder") or BACKEND_FASTEMBED
+        self._model = self._config.get("model") or DEFAULT_MODEL
+        self._device = self._config.get("device") or "auto"
+        self._embedder_impl: Embedder | None = None
+        # Last embedder failure, surfaced through unavailable_reason() so a
+        # dead embedder shows red in /status even when no tool has been called
+        # since it broke.
+        self._embed_error: str = ""
         self._breaker_open_until: float = 0.0
         self._breaker_failures = 0
         self._initialized = False
@@ -218,6 +273,11 @@ class QdrantMemoryProvider(MemoryProvider):
             return "qdrant-client is not installed in this environment"
         if not self._url:
             return "no Qdrant url configured (set memory.qdrant.url)"
+        if self._embed_error:
+            # An embedder failure must be visible even when the server is fine:
+            # a broken embedder leaves is_available() green while every write
+            # silently no-ops.
+            return self._embed_error
         if self._backend_error:
             return self._backend_error
         return ""
@@ -319,10 +379,9 @@ class QdrantMemoryProvider(MemoryProvider):
             return ""
 
         try:
-            # Encode query via embedder (or local sentence-transformers)
+            # Encode query via the configured embedder. A failure raises, and
+            # is logged below — it is never swallowed into a silent "".
             dense_vec = self._embed(query)
-            if dense_vec is None:
-                return ""
 
             # Dense semantic search via named "dense" vector.
             # NOTE 1: Prefetch must be the real qdrant_client.models.Prefetch —
@@ -403,8 +462,6 @@ class QdrantMemoryProvider(MemoryProvider):
             # Combine user + assistant for embedding
             combined = f"user: {user}\nassistant: {assistant}"
             dense_vec = self._embed(combined)
-            if dense_vec is None:
-                return
 
             point_id = str(uuid.uuid4())
             timestamp = datetime.now(timezone.utc).isoformat()
@@ -442,6 +499,8 @@ class QdrantMemoryProvider(MemoryProvider):
             return self._tool_recall(args)
         if tool_name == "qdrant_collect":
             return self._tool_collect(args)
+        if tool_name == "qdrant_prepare":
+            return self._tool_prepare(args)
         return f"Unknown qdrant tool: {tool_name}"
 
     # -- Tool implementations ------------------------------------------------
@@ -455,9 +514,12 @@ class QdrantMemoryProvider(MemoryProvider):
         if not query:
             return "qdrant_search: missing 'query' parameter"
 
-        dense_vec = self._embed(query)
-        if dense_vec is None:
-            return "qdrant_search: embedding failed"
+        try:
+            dense_vec = self._embed(query)
+        except EmbeddingError as e:
+            # Explicit, actionable failure. Never "embedding failed" with no
+            # detail — that is the silent-degradation trap this replaced.
+            return f"qdrant_search: {e}"
 
         try:
             results = self._client.query_points(
@@ -483,9 +545,11 @@ class QdrantMemoryProvider(MemoryProvider):
         if not text:
             return "qdrant_upsert: missing 'text' parameter"
 
-        dense_vec = self._embed(text)
-        if dense_vec is None:
-            return "qdrant_upsert: embedding failed"
+        try:
+            dense_vec = self._embed(text)
+        except EmbeddingError as e:
+            # A failed write must never look like a successful save.
+            return f"qdrant_upsert: {e}"
 
         try:
             point_id = str(uuid.uuid4())
@@ -550,6 +614,21 @@ class QdrantMemoryProvider(MemoryProvider):
             return f"Unknown action: {action} (supported: list, info)"
         except Exception as e:
             return f"qdrant_collect error: {e}"
+
+    def _tool_prepare(self, args: dict) -> str:
+        """Report embedder readiness, optionally downloading the model.
+
+        Returns a human-readable report. Failures are stated plainly rather
+        than folded into a generic error, because the whole point of this tool
+        is to tell the user what is actually wrong.
+        """
+        download = bool(args.get("download", False))
+        try:
+            return self.prepare_report(download=download)
+        except EmbeddingError as e:
+            return f"qdrant_prepare: {e}"
+        except Exception as e:
+            return f"qdrant_prepare error: {type(e).__name__}: {e}"
 
     # -- Session hooks -------------------------------------------------------
 
@@ -670,35 +749,236 @@ class QdrantMemoryProvider(MemoryProvider):
                 "key": "embedder",
                 "label": "Embedder",
                 "type": "select",
-                "default": "",
-                "choices": ["", "sentence-transformers"],
-                "description": "Embedding backend. 'sentence-transformers' (default) runs "
-                               "all-MiniLM-L6-v2 locally at 384 dims.",
+                "default": "fastembed",
+                "choices": ["fastembed", "sentence-transformers"],
+                "description": (
+                    "Embedding backend. 'fastembed' (default) runs the model on "
+                    "ONNX Runtime — CPU-only, ~290 MB peak RSS, no CUDA build "
+                    "needed. 'sentence-transformers' uses PyTorch: ~2.2 GB peak "
+                    "RSS, but faster on a machine with a GPU. Both produce "
+                    "identical vectors for the same model."
+                ),
+            },
+            {
+                "key": "model",
+                "label": "Embedding Model",
+                "type": "string",
+                "default": DEFAULT_MODEL,
+                "description": (
+                    "Model checkpoint, passed explicitly to the backend. Never "
+                    "left blank: a library's own default model would silently "
+                    "embed in a different vector space and break recall."
+                ),
+            },
+            {
+                "key": "device",
+                "label": "Device",
+                "type": "select",
+                "default": "auto",
+                "choices": ["auto", "cpu", "cuda"],
+                "description": (
+                    "Compute device. 'auto' lets the backend choose (CPU for "
+                    "ONNX). 'cuda' requires a working CUDA provider and fails "
+                    "loudly if none is present."
+                ),
             },
         ]
 
     # -- Internal helpers ----------------------------------------------------
 
-    def _embed(self, text: str) -> list[float] | None:
-        """Encode text to a dense vector.
+    # -- Embedder ------------------------------------------------------------
 
-        Uses the configured embedder, or falls back to a simple
-        sentence-transformers local model. Returns None on failure.
+    def get_embedder(self) -> Embedder:
+        """Return the configured embedder, validating it on first use.
+
+        A bad backend or an empty model name is a deterministic configuration
+        error, so it raises here rather than being quietly replaced by some
+        other model.
         """
-        if self._embedder:
-            # TODO: integrate with configured embedder
-            logger.debug("Custom embedder not yet implemented: %s", self._embedder)
+        if self._embedder_impl is None:
+            self._embedder_impl = Embedder(
+                backend=self._embedder,
+                model=self._model,
+                device=self._device,
+            )
+        return self._embedder_impl
 
-        # Fallback: try sentence-transformers
+    def _embed(self, text: str) -> list[float]:
+        """Encode `text` to a dense vector.
+
+        Raises EmbeddingError (a config or runtime subclass) on every failure
+        path. It never returns None: a caller that received a vector can trust
+        that the text really was encoded, which the previous
+        ``try/except: return None`` could not guarantee.
+        """
+        embedder = self.get_embedder()
         try:
-            from sentence_transformers import SentenceTransformer
-            if not hasattr(self, "_embed_model"):
-                self._embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-            vec = self._embed_model.encode(text, normalize_embeddings=True)
-            return vec.tolist()
-        except Exception as e:
-            logger.debug("Embedding failed: %s", e)
+            vec = embedder.encode(text)
+        except EmbeddingConfigError:
+            # Tier 1: deterministic. Re-raise so the tool boundary can report
+            # it verbatim, and record it so /status goes red.
+            self._embed_error = (
+                f"embedder misconfigured: backend={self._embedder!r} "
+                f"model={self._model!r}"
+            )
+            logger.error("Qdrant embedder configuration error: %s",
+                         embedder, exc_info=True)
+            raise
+        except EmbeddingRuntimeError as e:
+            # Tier 2: transient. Do not raise-and-hide, do not return None —
+            # report loudly and let the caller decide whether to retry.
+            self._embed_error = str(e)
+            logger.error("Qdrant embedding failed (transient): %s", e)
+            raise
+        self._embed_error = ""
+        return vec
+
+    # -- Model preparation and validation -------------------------------------
+
+    def ensure_model(self, download: bool = False) -> tuple[bool, str]:
+        """Check the configured model is available locally, optionally fetching.
+
+        Returns ``(ok, message)`` where the message is written for a human, not
+        for a log file. Called from check_backend() so /status and the
+        dashboard report a missing model instead of showing green.
+        """
+        try:
+            embedder = self.get_embedder()
+        except EmbeddingConfigError as e:
+            self._embed_error = str(e)
+            return False, str(e)
+
+        present = model_is_present(self._model)
+        if present and not download:
+            return True, f"model {self._model!r} is present (backend {self._embedder})"
+
+        if not download:
+            msg = (
+                f"model {self._model!r} not found in {model_cache_dir()!r}. "
+                f"Run qdrant_prepare to download it, or set memory.qdrant.model."
+            )
+            self._embed_error = msg
+            return False, msg
+
+        # download=True: actually construct it, which fetches the weights.
+        try:
+            dim = embedder.dimension()
+        except EmbeddingError as e:
+            self._embed_error = str(e)
+            return False, f"download failed: {e}"
+        msg = f"model {self._model!r} ready (backend {self._embedder}, {dim} dims)"
+        self._embed_error = ""
+        return True, msg
+
+    def validate_vector_spec(self) -> list[str]:
+        """Return user-facing problems/recommendations about the vector setup.
+
+        Deliberately returns prose lines, not booleans: the value is telling the
+        user what is wrong, which numbers disagree, and what to do about it.
+        Empty list means everything checks out.
+        """
+        issues: list[str] = []
+
+        # 1. model dimensionality vs configured vector_size
+        try:
+            model_dim = self.get_embedder().dimension()
+        except EmbeddingError as e:
+            issues.append(f"embedder unavailable: {e}")
+            model_dim = 0
+
+        if model_dim and self._vector_size != model_dim:
+            issues.append(
+                f"vector_size is {self._vector_size} but model "
+                f"{self._model!r} produces {model_dim} dimensions. "
+                f"Set memory.qdrant.vector_size to {model_dim} (and recreate the "
+                f"collection) or choose a {self._vector_size}-dim model."
+            )
+
+        # 2. distance metric
+        if self._distance != "Cosine":
+            issues.append(
+                f"distance is {self._distance!r}; sentence-embedding models "
+                "like all-MiniLM-L6-v2 expect 'Cosine' on L2-normalised "
+                "vectors. Other metrics change result ranking."
+            )
+
+        # 3. config vs the live collection — the silently-wrong-recall state
+        live = self._live_vector_spec()
+        if live:
+            live_size, live_dist = live
+            if model_dim and live_size and live_size != model_dim:
+                issues.append(
+                    f"collection {self._collection!r} stores {live_size}-dim "
+                    f"vectors but the configured model produces {model_dim}. "
+                    "Recall will be wrong until one of them changes."
+                )
+            if live_dist and live_dist.lower() != str(self._distance).lower():
+                issues.append(
+                    f"collection uses distance {live_dist!r} but config says "
+                    f"{self._distance!r}."
+                )
+        return issues
+
+    def _live_vector_spec(self) -> tuple[int, str] | None:
+        """Read the collection's actual vector size/distance, or None if unknown.
+
+        Opens its own short-lived client (same pattern as check_backend) rather
+        than reusing the provider's, so a validation run never disturbs a live
+        connection and never trips the circuit breaker.
+        """
+        try:
+            from qdrant_client import QdrantClient
+        except ImportError:
             return None
+        if not self._url:
+            return None
+
+        client = None
+        try:
+            client = QdrantClient(url=self._url, api_key=self._api_key or None,
+                                  prefer_grpc=False, timeout=5)
+            info = client.get_collection(self._collection)
+            raw = info.config.params.vectors
+            spec = None
+            if isinstance(raw, dict):
+                spec = raw.get("dense")
+            elif raw is not None:
+                # Unnamed/single vector config — surface its size anyway.
+                spec = {"size": getattr(raw, "size", None),
+                        "distance": getattr(raw, "distance", None)}
+            if spec is None:
+                return None
+            size = int(getattr(spec, "size", 0) or 0)
+            dist = str(getattr(spec, "distance", "") or "")
+            return (size, dist) if size else None
+        except Exception as e:
+            logger.debug("live vector spec unavailable: %s", e)
+            return None
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+    def prepare_report(self, download: bool = False) -> str:
+        """Human-readable readiness report combining presence and spec checks."""
+        lines: list[str] = []
+        ok, msg = self.ensure_model(download=download)
+        lines.append(("OK  " if ok else "FAIL") + f"  model: {msg}")
+        lines.append(f"      backend={self._embedder!r} model={self._model!r} "
+                     f"device={self._device!r} cache={model_cache_dir()!r}")
+
+        live = self._live_vector_spec()
+        if live:
+            lines.append(f"      collection {self._collection!r}: "
+                         f"{live[0]} dims, {live[1]}")
+        else:
+            lines.append(f"      collection {self._collection!r}: not reachable")
+
+        for issue in self.validate_vector_spec():
+            lines.append(f"WARN  {issue}")
+        return "\n".join(lines)
 
     def _is_breaker_open(self) -> bool:
         """Check if the circuit breaker is open."""

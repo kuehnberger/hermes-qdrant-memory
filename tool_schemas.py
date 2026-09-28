@@ -109,6 +109,28 @@ QDRANT_COLLECT_SCHEMA = {
     },
 }
 
+QDRANT_PREPARE_SCHEMA = {
+    "name": "qdrant_prepare",
+    "description": (
+        "Check the memory embedder is ready: is the model present on disk, do "
+        "the configured vector size and distance match the model and the live "
+        "collection? Use download=true to fetch a missing model. Returns a "
+        "readable report with any problems and recommended fixes."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "download": {
+                "type": "boolean",
+                "description": "Fetch the model if it is not cached (default false, "
+                               "which only reports)",
+                "default": False,
+            },
+        },
+        "required": [],
+    },
+}
+
 # ---------------------------------------------------------------------------
 # All schemas (returned by get_tool_schemas)
 # ---------------------------------------------------------------------------
@@ -118,4 +140,5 @@ ALL_TOOL_SCHEMAS = [
     QDRANT_UPSERT_SCHEMA,
     QDRANT_RECALL_SCHEMA,
     QDRANT_COLLECT_SCHEMA,
+    QDRANT_PREPARE_SCHEMA,
 ]

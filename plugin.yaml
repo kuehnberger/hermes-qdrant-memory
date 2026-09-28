@@ -12,11 +12,16 @@ description: "Self-hostable Qdrant vector-memory backend for Hermes — hybrid d
 requires_hermes: ">=0.21.4"       # parses under _VERSION_COMPARATOR_RE
 
 # NOT pip_dependencies — that key is silently dropped by parse_manifest_file().
-# torch is deliberately NOT declared: it is transitive via sentence-transformers,
-# and pinning a second constraint on an ~800 MB dependency is not ours to own.
+# BOTH embedder backends are declared, not just the default. 'fastembed' (ONNX
+# Runtime, CPU-only) is the default because it measured 291 MB peak RSS against
+# sentence-transformers' 2,191 MB; 'sentence-transformers' stays a supported,
+# configurable option for machines with a GPU or RAM to spare. torch itself is
+# deliberately NOT declared: it is transitive via sentence-transformers, and
+# pinning a second constraint on that ~800 MB dependency is not ours to own.
 # 1.10.0 is the oldest floor with query_points + Prefetch + FusionQuery.
 python_dependencies:
   - "qdrant-client>=1.10.0,<2"
+  - "fastembed>=0.4.0"
   - "sentence-transformers>=2.7.0,<7"
 
 requires_env: []                  # a LOCAL default means no env gate
@@ -30,6 +35,7 @@ provides_tools:
   - qdrant_upsert
   - qdrant_recall
   - qdrant_collect
+  - qdrant_prepare
 provides_hooks: []
 
 # No config_fields: — not a manifest key; it is dropped with a warning. The schema
