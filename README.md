@@ -40,16 +40,28 @@ session.
   | package | constraint | why |
   |---|---|---|
   | `qdrant-client` | `>=1.10.0,<2` | 1.10.0 is the oldest floor with `query_points` / `Prefetch` / `FusionQuery` |
-  | `sentence-transformers` | `>=2.7.0,<7` | local embeddings — **heavy**, see below |
+  | `fastembed` | `>=0.4.0` | default embedder — ONNX, no torch, ~230 MB RSS |
+  | `sentence-transformers` | `>=2.7.0,<7` | opt-in GPU backend — **heavy**, see below |
 
 `torch` comes in transitively and is intentionally not pinned here.
 
 > **Size warning.** `sentence-transformers` is the heavy dependency: it pulls
-> `torch`, which is roughly 600 MB of RSS and several hundred MB on disk. The
-> wide `>=2.7.0,<7` span is deliberate — a tight pin would freeze users onto an
-> old dependency and miss upstream security fixes. If you only intend to use a
-> remote Qdrant endpoint, you can skip the local embedder entirely; see the
-> `embedder` config key above.
+> `torch` plus the CUDA wheels — measured at 1.2 GB of `torch`, 3.2 GB of
+> `nvidia-*` and 895 MB of `triton` in a CUDA build, ~5.3 GB total. The
+> default `fastembed` backend needs none of it. The wide `>=2.7.0,<7` span is
+> deliberate — a tight pin would freeze users onto an old dependency and miss
+> upstream security fixes. If you only intend to use a remote Qdrant endpoint,
+> you can skip the local embedder entirely; see the `embedder` config key above.
+
+> **If you uninstall torch, it can come back silently.** Removing `torch`
+> (or the `nvidia-*` / `triton` wheels) is safe while the default `fastembed`
+> backend is in use — nothing in the runtime imports torch. But if any other
+> package later pulls in a torch dependency, pip/uv will reinstall the full
+> CUDA build and give back all ~5.3 GB without saying why. Selecting
+> `embedder: sentence-transformers` after such a removal fails loudly with a
+> `ModuleNotFoundError` naming torch; the fix is to reinstall it
+> (`uv pip install torch`, or `torch --index-url .../cu124` for the CUDA build)
+> rather than to debug the plugin.
 
 ## Setup
 
@@ -84,7 +96,9 @@ default URL needs neither.
 | `collection` | string | `hermes_memories` | collection name |
 | `vector_size` | integer | `384` | must match your embedder |
 | `distance` | select | `Cosine` | `Cosine`, `Dot`, `Euclid` |
-| `embedder` | select | `""` | `""` or `sentence-transformers` |
+| `embedder` | select | `fastembed` | `fastembed` (default, no torch) or `sentence-transformers` (GPU, needs torch) |
+| `model` | string | `sentence-transformers/all-MiniLM-L6-v2` | must match the backend's catalog; changing it changes vector space |
+| `device` | select | `cpu` | `auto`, `cpu` — `cuda` requires the `sentence-transformers` backend |
 
 Resolution order, lowest to highest: built-in defaults → `config.yaml`'s
 `memory.qdrant` → `config.json` → `QDRANT_URL` / `QDRANT_API_KEY` from the
@@ -93,9 +107,25 @@ written into `config.yaml`.
 
 ## Embeddings
 
-Local, via `sentence-transformers` `all-MiniLM-L6-v2` at **384 dimensions**.
-The first call downloads the model (~90 MB) — that is the Hugging Face Hub
-warning you will see on a cold start. Nothing leaves your machine.
+Local, at **384 dimensions**, via one of two backends:
+
+| backend | requires | when to pick it |
+|---|---|---|
+| `fastembed` (default) | `fastembed` only — ONNX, no torch | CPU hosts; ~230 MB RSS, no torch install |
+| `sentence-transformers` | `torch` + CUDA wheels (~5.3 GB) | GPU hosts needing CUDA, or models outside fastembed's catalog |
+
+Both are pinned to `sentence-transformers/all-MiniLM-L6-v2` by default, and
+they produce **identical vectors** for that model (measured cosine 1.0000),
+so switching backends does not require re-embedding an existing collection.
+
+The first call downloads the model (~90 MB via the Hugging Face Hub for the
+`sentence-transformers` backend; fastembed caches an ONNX export under
+`$TMPDIR/fastembed_cache`) — that cold-start download is the warning you will
+see. Nothing leaves your machine.
+
+Choosing a different `model` **changes the vector space** and invalidates
+every existing point; re-embed or start a new collection. `qdrant_prepare`
+reports the model's dimensions and cache location before you commit to that.
 
 If you change `vector_size` away from 384 you must also supply a matching
 embedding model; the mismatch surfaces as a write error, not a config error.
@@ -114,8 +144,10 @@ Documented here so nobody has to read the source to find out:
 
 ## Troubleshooting
 
-**`unavailable_reason()` mentions a missing dependency** — install the two
-packages above in the same interpreter Hermes runs from.
+**`unavailable_reason()` mentions a missing dependency** — install the
+packages above in the same interpreter Hermes runs from. The default backend
+needs only `fastembed`; a `ModuleNotFoundError` for `torch` means you selected
+`sentence-transformers` on a host where torch was removed (see the size note).
 
 **It says available but recall returns nothing** — the server is up but the
 collection is empty or empty-filtered; check `qdrant_collect(action="info")`.
