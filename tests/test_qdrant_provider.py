@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from plugins.memory.qdrant import EmbeddingError
+from plugins.memory.qdrant import EmbeddingError, model_is_present
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -518,7 +518,6 @@ class TestEmbedderContract:
 
     def test_bad_model_raises_on_encode(self, qdrant_provider):
         """A nonexistent model is deterministic — it must raise, not return None."""
-        from plugins.memory.qdrant import EmbeddingError
         qdrant_provider._model = "definitely/not-a-real-model-xyz"
         qdrant_provider._embedder_impl = None
         with pytest.raises(EmbeddingError):
@@ -672,3 +671,80 @@ class TestEmbedderParityLive:
                 break
         if not checked:
             pytest.skip("no suitable stored points found to compare")
+
+
+class TestModelPresence:
+    """model_is_present() must look where fastembed ACTUALLY caches.
+
+    Regression: qdrant_prepare reported a working model as missing on the live
+    install while embedding succeeded in 0.04s. fastembed's default cache is
+    tempfile.gettempdir()/fastembed_cache, not the XDG ~/.cache/fastembed, and
+    Hermes points TMPDIR at its scratch dir — so the XDG-only check missed the
+    one directory in use. This matters beyond cosmetics: prepare exists to
+    decide whether to OFFER a download, so a false "missing" prompts the user
+    to fetch a model they already have.
+    """
+
+    def _write_model(self, root, dirname="models--qdrant--all-MiniLM-L6-v2-onnx"):
+        d = root / dirname / "snapshots" / "abc123"
+        d.mkdir(parents=True)
+        (d / "model.onnx").write_bytes(b"stub")
+        return root
+
+    def test_finds_model_in_tmpdir_fastembed_cache(self, tmp_path, monkeypatch):
+        # tempfile.gettempdir() memoises its result on first call, so setting
+        # TMPDIR after import has no effect — patch the function itself.
+        from plugins.memory.qdrant import embedder as emb
+
+        cache = tmp_path / "fastembed_cache"
+        self._write_model(cache)
+        monkeypatch.setattr(emb.tempfile, "gettempdir", lambda: str(tmp_path))
+        assert model_is_present("sentence-transformers/all-MiniLM-L6-v2")
+        assert str(cache) in [str(p) for p in emb._cache_roots()]
+
+    def test_finds_model_under_explicit_env_var(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path))
+        self._write_model(tmp_path)
+        assert model_is_present("sentence-transformers/all-MiniLM-L6-v2")
+
+    def test_matches_repo_style_dir_name(self, tmp_path, monkeypatch):
+        """fastembed stores qdrant/all-MiniLM-L6-v2-onnx, not the HF name.
+
+        The directory does not literally contain the configured model name, so
+        a naive full-string comparison would miss it.
+        """
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path))
+        self._write_model(tmp_path)
+        assert model_is_present("sentence-transformers/all-MiniLM-L6-v2")
+
+    def test_absent_model_is_false(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path))
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        assert not model_is_present("not/a-real-model-999")
+
+    def test_empty_model_is_false(self):
+        assert not model_is_present("")
+
+    def test_missing_dir_does_not_raise(self, tmp_path, monkeypatch):
+        from plugins.memory.qdrant import embedder as emb
+
+        monkeypatch.setattr(emb, "_cache_roots", lambda: [
+            tmp_path / "nope", tmp_path / "also-nope" / "fastembed_cache"])
+        assert not model_is_present("sentence-transformers/all-MiniLM-L6-v2")
+
+    def test_unreadable_root_is_skipped_not_fatal(self, tmp_path, monkeypatch):
+        from plugins.memory.qdrant import embedder as emb
+
+        # A root that exists but is a FILE, not a directory: iterdir() raises
+        # NotADirectoryError. It must be swallowed, not propagate.
+        blocker = tmp_path / "blocked"
+        blocker.write_text("not a dir")
+        monkeypatch.setattr(emb, "_cache_roots", lambda: [blocker])
+        assert not model_is_present("sentence-transformers/all-MiniLM-L6-v2")
+
+    def test_live_model_is_reported_present(self, qdrant_provider):
+        """The model the live stack actually has must not be reported missing."""
+        out = qdrant_provider.handle_tool_call("qdrant_prepare", {})
+        assert "not found" not in out.lower(), (
+            f"qdrant_prepare claims the model is absent but it is cached: {out}"
+        )

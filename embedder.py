@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -103,10 +104,6 @@ def _cache_roots() -> list[Path]:
     fe_env = os.environ.get("FASTEMBED_CACHE_PATH")
     if fe_env:
         roots.append(Path(fe_env))
-
-    # fastembed's own default: $TMPDIR/fastembed_cache.
-    import tempfile
-
     roots.append(Path(tempfile.gettempdir()) / "fastembed_cache")
 
     hf_home = os.environ.get("HF_HOME")
