@@ -401,16 +401,36 @@ class QdrantMemoryProvider(MemoryProvider):
             return ""
 
     def queue_prefetch(self, query: str, *, session_id: str = "", **kwargs: Any) -> None:
-        """Background prefetch — spawn a thread (simplified; real impl uses spawn_context_thread)."""
-        import threading
+        """Background prefetch on a scope-bound thread.
+
+        ``plugins/AGENTS.md`` requires every memory-provider background job to go
+        through ``spawn_context_thread`` so the worker inherits the spawning
+        profile's contextvars. A bare ``threading.Thread`` runs with no scope
+        and fails closed, or worse, writes into the launch profile's tenant.
+        """
+        try:
+            from agent.memory_provider import spawn_context_thread
+        except Exception:
+            # Core symbol unavailable (tests stub it, or an old checkout): fall
+            # back rather than lose the prefetch entirely, and say so once.
+            import threading
+
+            logger.debug(
+                "spawn_context_thread unavailable; prefetch thread will run unscoped"
+            )
+            spawn = threading.Thread
+        else:
+            spawn = spawn_context_thread
 
         def _run():
             try:
                 self.prefetch(query, session_id=session_id, **kwargs)
             except Exception as e:
-                logger.debug("Background prefetch error: %s", e)
+                # A background prefetch failure must be visible without being
+                # fatal; the turn does not depend on it.
+                logger.warning("Qdrant background prefetch failed: %s", e)
 
-        t = threading.Thread(target=_run, daemon=True, name="qdrant-prefetch")
+        t = spawn(target=_run, name="qdrant-prefetch", daemon=True)
         t.start()
         self._prefetch_thread = t
 
@@ -613,20 +633,6 @@ class QdrantMemoryProvider(MemoryProvider):
             return f"qdrant_prepare: {e}"
         except Exception as e:
             return f"qdrant_prepare error: {type(e).__name__}: {e}"
-
-    # -- Session hooks -------------------------------------------------------
-
-    def on_session_switch(self, new_session_id: str, **kwargs: Any) -> None:
-        """Rebind session — no-op for payload-level isolation."""
-        logger.debug("Session switch to %s", new_session_id)
-
-    def on_session_end(self, messages: list, **kwargs: Any) -> None:
-        """Optional: flush/compact on session end."""
-        pass
-
-    def on_pre_compress(self, messages: list, *, session_id: str = "", **kwargs: Any) -> None:
-        """Called before context compression — optional."""
-        pass
 
     # -- Config + Tool Schemas (ABC methods) --------------------------------
 

@@ -171,6 +171,11 @@ embedding model; the mismatch surfaces as a write error, not a config error.
 
 Documented here so nobody has to read the source to find out:
 
+- **Lifecycle hooks** — none. The provider takes `session_id` on every call
+  (`sync_turn(..., session_id=...)`, and `session_id` is a *required* parameter
+  of `qdrant_recall`), so there is no session state to rebind and nothing to
+  flush at a session boundary. `on_pre_compress` would be a real addition — a
+  digest point written before the transcript is discarded — and is not built.
 - **Hybrid dense+sparse RRF search** and **INT8 scalar quantization** exist in
   `_backend.py` but are *not wired into the provider* — the provider talks to
   `QdrantClient` directly. Unreachable today.
