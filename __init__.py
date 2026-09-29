@@ -57,7 +57,9 @@ BACKEND_ST = _embedder.BACKEND_ST
 BACKENDS = _embedder.BACKENDS
 DEFAULT_MODEL = _embedder.DEFAULT_MODEL
 model_cache_dir = _embedder.model_cache_dir
+model_cache_locations = _embedder.model_cache_locations
 model_is_present = _embedder.model_is_present
+pinned_cache_dir = _embedder.pinned_cache_dir
 
 logger = logging.getLogger("hermes.plugins.memory.qdrant")
 
@@ -875,6 +877,11 @@ class QdrantMemoryProvider(MemoryProvider):
         Returns ``(ok, message)`` where the message is written for a human, not
         for a log file. Called from check_backend() so /status and the
         dashboard report a missing model instead of showing green.
+
+        Presence is judged against the directory the backend LOADS from, and a
+        copy found anywhere else is named in the message — a stale copy in a
+        prunable ``$TMPDIR`` is precisely the case where "present" used to be a
+        lie that then downloaded 90 MB mid-session.
         """
         try:
             embedder = self.get_embedder()
@@ -882,25 +889,47 @@ class QdrantMemoryProvider(MemoryProvider):
             self._embed_error = str(e)
             return False, str(e)
 
-        present = model_is_present(self._model)
+        cache = model_cache_dir(self._embedder)
+        present = model_is_present(self._model, backend=self._embedder)
+        stale: list[str] = []
+        if self._embedder == BACKEND_FASTEMBED:
+            stale = [str(p) for p in model_cache_locations(self._model)
+                     if str(p) != cache]
+
         if present and not download:
-            return True, f"model {self._model!r} is present (backend {self._embedder})"
+            return True, (f"model {self._model!r} is present "
+                          f"(backend {self._embedder}) in {cache}")
 
         if not download:
-            msg = (
-                f"model {self._model!r} not found in {model_cache_dir()!r}. "
-                f"Run qdrant_prepare to download it, or set memory.qdrant.model."
-            )
+            stale_note = ""
+            if stale:
+                stale_note = (f" A copy sits in {', '.join(stale)}, but "
+                              f"{self._embedder} loads from {cache}, so it "
+                              f"will be downloaded there.")
+            msg = (f"model {self._model!r} not found in {cache!r}."
+                   f"{stale_note} "
+                   f"Run qdrant_prepare to download it, or set "
+                   f"memory.qdrant.model.")
             self._embed_error = msg
             return False, msg
 
         # download=True: actually construct it, which fetches the weights.
+        if not present:
+            # Announce the fetch before it starts: the Hugging Face download
+            # bars otherwise appear out of nowhere in the middle of a turn.
+            self._emit_progress(
+                "model_sync",
+                f"⬇ qdrant — downloading embedding model to {cache}...",
+                verbose=True,
+            )
         try:
             dim = embedder.dimension()
         except EmbeddingError as e:
             self._embed_error = str(e)
             return False, f"download failed: {e}"
-        msg = f"model {self._model!r} ready (backend {self._embedder}, {dim} dims)"
+        self._emit_progress("model_sync", f"⬇ qdrant — model ready in {cache}")
+        msg = (f"model {self._model!r} ready (backend {self._embedder}, "
+               f"{dim} dims) in {cache}")
         self._embed_error = ""
         return True, msg
 
@@ -1001,7 +1030,7 @@ class QdrantMemoryProvider(MemoryProvider):
         ok, msg = self.ensure_model(download=download)
         lines.append(("OK  " if ok else "FAIL") + f"  model: {msg}")
         lines.append(f"      backend={self._embedder!r} model={self._model!r} "
-                     f"device={self._device!r} cache={model_cache_dir()!r}")
+                     f"device={self._device!r} cache={model_cache_dir(self._embedder)!r}")
 
         live = self._live_vector_spec()
         if live:

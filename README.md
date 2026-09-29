@@ -161,9 +161,14 @@ they produce **identical vectors** for that model (measured cosine 1.0000),
 so switching backends does not require re-embedding an existing collection.
 
 The first call downloads the model (~90 MB via the Hugging Face Hub for the
-`sentence-transformers` backend; fastembed caches an ONNX export under
-`$TMPDIR/fastembed_cache`) — that cold-start download is the warning you will
-see. Nothing leaves your machine.
+`sentence-transformers` backend; fastembed keeps an ONNX export in
+`<hermes home>/state/qdrant/model_cache`, shared by every profile,
+`FASTEMBED_CACHE_PATH` overrides it) — that cold-start download is the warning
+you will see. The path is pinned deliberately: fastembed's own default is
+`$TMPDIR/fastembed_cache`, and Hermes reaps scratch entries idle for 24 hours,
+which re-downloaded the weights on every prune, once per distinct `$TMPDIR`.
+`qdrant_prepare` prints the directory it will load from, so a cache miss is
+reported before it costs you a download. Nothing leaves your machine.
 
 Choosing a different `model` **changes the vector space** and invalidates
 every existing point; re-embed or start a new collection. `qdrant_prepare`

@@ -9,6 +9,7 @@ the ``live_qdrant`` fixture in ``conftest.py``.
 import json
 import sys
 import types
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -674,15 +675,21 @@ class TestEmbedderParityLive:
 
 
 class TestModelPresence:
-    """model_is_present() must look where fastembed ACTUALLY caches.
+    """model_is_present() must answer the question the caller is really asking:
+    will this embed WITHOUT a download?
 
-    Regression: qdrant_prepare reported a working model as missing on the live
-    install while embedding succeeded in 0.04s. fastembed's default cache is
-    tempfile.gettempdir()/fastembed_cache, not the XDG ~/.cache/fastembed, and
-    Hermes points TMPDIR at its scratch dir — so the XDG-only check missed the
-    one directory in use. This matters beyond cosmetics: prepare exists to
-    decide whether to OFFER a download, so a false "missing" prompts the user
-    to fetch a model they already have.
+    Regression history, in order. First, qdrant_prepare reported a working
+    model as missing while embedding succeeded in 0.04s — fastembed's default
+    cache is ``tempfile.gettempdir()/fastembed_cache``, not the XDG
+    ``~/.cache/fastembed`` a naive check looked at, and Hermes points TMPDIR at
+    its scratch dir. Fixing that by searching EVERY cache root then created the
+    opposite lie: a copy stranded in scratch (which is reaped after 24 h idle)
+    counted as "present" while the pinned load path was empty, so a
+    download-free embed still downloaded 90 MB mid-session.
+
+    So presence now tracks the load path exactly — ``pinned_cache_dir()`` for
+    fastembed, the huggingface_hub roots for sentence-transformers — and
+    ``model_cache_locations()`` keeps the stale copies visible for reporting.
     """
 
     def _write_model(self, root, dirname="models--qdrant--all-MiniLM-L6-v2-onnx"):
@@ -691,16 +698,90 @@ class TestModelPresence:
         (d / "model.onnx").write_bytes(b"stub")
         return root
 
-    def test_finds_model_in_tmpdir_fastembed_cache(self, tmp_path, monkeypatch):
-        # tempfile.gettempdir() memoises its result on first call, so setting
-        # TMPDIR after import has no effect — patch the function itself.
+    def test_pinned_cache_is_the_presence_root(self, tmp_path, monkeypatch):
+        """The directory reported as the cache IS the one checked for presence."""
         from plugins.memory.qdrant import embedder as emb
 
-        cache = tmp_path / "fastembed_cache"
-        self._write_model(cache)
-        monkeypatch.setattr(emb.tempfile, "gettempdir", lambda: str(tmp_path))
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path))
+        self._write_model(tmp_path)
         assert model_is_present("sentence-transformers/all-MiniLM-L6-v2")
-        assert str(cache) in [str(p) for p in emb._cache_roots()]
+        assert emb.model_cache_dir() == str(tmp_path)
+        assert [str(p) for p in emb._roots_for(emb.BACKEND_FASTEMBED)] == [str(tmp_path)]
+
+    def test_stale_tmpdir_copy_is_reported_but_not_present(self, tmp_path, monkeypatch):
+        """A copy in a prunable TMPDIR is NOT "present" — but must still be named.
+
+        tempfile.gettempdir() memoises its result on first call, so setting
+        TMPDIR after import has no effect — patch the function itself.
+        """
+        from plugins.memory.qdrant import embedder as emb
+
+        pinned = tmp_path / "pinned"          # the load path, deliberately empty
+        pinned.mkdir()
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(pinned))
+        stale = tmp_path / "fastembed_cache"  # what fastembed would have used
+        self._write_model(stale)
+        monkeypatch.setattr(emb.tempfile, "gettempdir", lambda: str(tmp_path))
+
+        assert str(stale) in [str(p) for p in emb._cache_roots()]
+        # Lying the other way is what made prepare promise a download-free
+        # embed that then downloaded: the load path (pinned) has no model.
+        assert not model_is_present("sentence-transformers/all-MiniLM-L6-v2")
+        locs = [str(p) for p in emb.model_cache_locations(
+            "sentence-transformers/all-MiniLM-L6-v2")]
+        assert str(stale) in locs, locs
+
+    def test_pinned_cache_is_one_path_for_every_home(self, tmp_path, monkeypatch):
+        """Profile home and base home must pin the SAME directory, outside scratch.
+
+        Regression: fastembed defaulted to $TMPDIR/fastembed_cache, each home has
+        its own TMPDIR, and scratch is reaped after SCRATCH_MAX_IDLE_HOURS —
+        three simultaneous copies of the 90 MB weights existed on 2026-09-29.
+        """
+        from plugins.memory.qdrant import embedder as emb
+
+        monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profiles" / "alice"))
+        profile_pin = emb.pinned_cache_dir()
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        base_pin = emb.pinned_cache_dir()
+
+        expected = tmp_path / "state" / "qdrant" / "model_cache"
+        assert profile_pin == base_pin == expected
+        # Within the home itself the pin lives in state/, never in the cache
+        # tree that prune_scratch_dir() reaps.
+        assert not str(profile_pin).startswith(str(tmp_path / "cache/"))
+
+    def test_fastembed_is_constructed_with_the_pinned_cache_dir(
+            self, tmp_path, monkeypatch):
+        """The fix itself: fastembed must be TOLD where to load from.
+
+        Without ``cache_dir`` fastembed falls back to $TMPDIR/fastembed_cache
+        (prunable) while model_is_present() consults the pinned dir — the two
+        disagree, which is the "present but not loadable" mismatch.
+        """
+        from plugins.memory.qdrant import embedder as emb
+
+        pin = tmp_path / "pin"
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(pin))
+        calls: list[dict] = []
+
+        class _RecordingTextEmbedding:
+            dim = 384
+
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+
+        fake = types.ModuleType("fastembed")
+        fake.TextEmbedding = _RecordingTextEmbedding
+        monkeypatch.setitem(sys.modules, "fastembed", fake)
+
+        emb.Embedder(backend=emb.BACKEND_FASTEMBED, model=emb.DEFAULT_MODEL)._build()
+
+        assert calls, "TextEmbedding was never constructed"
+        assert calls[-1]["cache_dir"] == str(pin)
+        assert calls[-1]["model_name"] == emb.DEFAULT_MODEL
+        assert emb.model_cache_dir(emb.BACKEND_FASTEMBED) == str(pin)
 
     def test_finds_model_under_explicit_env_var(self, tmp_path, monkeypatch):
         monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path))
@@ -728,7 +809,10 @@ class TestModelPresence:
     def test_missing_dir_does_not_raise(self, tmp_path, monkeypatch):
         from plugins.memory.qdrant import embedder as emb
 
-        monkeypatch.setattr(emb, "_cache_roots", lambda: [
+        # _roots_for() is what model_is_present() walks for the fastembed
+        # backend — patch that, or the test would pass without exercising
+        # a missing root at all.
+        monkeypatch.setattr(emb, "_roots_for", lambda backend: [
             tmp_path / "nope", tmp_path / "also-nope" / "fastembed_cache"])
         assert not model_is_present("sentence-transformers/all-MiniLM-L6-v2")
 
@@ -739,14 +823,23 @@ class TestModelPresence:
         # NotADirectoryError. It must be swallowed, not propagate.
         blocker = tmp_path / "blocked"
         blocker.write_text("not a dir")
-        monkeypatch.setattr(emb, "_cache_roots", lambda: [blocker])
+        monkeypatch.setattr(emb, "_roots_for", lambda backend: [blocker])
         assert not model_is_present("sentence-transformers/all-MiniLM-L6-v2")
 
-    def test_live_model_is_reported_present(self, qdrant_provider):
-        """The model the live stack actually has must not be reported missing."""
+    def test_live_model_is_reported_present(self, qdrant_provider, monkeypatch):
+        """The model the live stack actually has must not be reported missing.
+
+        The autouse fixture points HERMES_HOME at a tmp dir so plugin discovery
+        is isolated; the real weights live under the real home's pinned cache,
+        so this one live check drops the override.
+        """
+        monkeypatch.setenv("HERMES_HOME", str(Path.home() / ".hermes"))
         out = qdrant_provider.handle_tool_call("qdrant_prepare", {})
         assert "not found" not in out.lower(), (
             f"qdrant_prepare claims the model is absent but it is cached: {out}"
+        )
+        assert "state/qdrant/model_cache" in out, (
+            f"prepare did not report the pinned cache path: {out}"
         )
 
 

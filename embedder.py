@@ -86,36 +86,52 @@ class EmbeddingRuntimeError(EmbeddingError):
 
 
 # ---------------------------------------------------------------------------
-# Model presence / download
+# Model cache: one pinned directory, plus the legacy places copies exist
 # ---------------------------------------------------------------------------
 
-def _cache_roots() -> list[Path]:
-    """Directories a model may already be cached in, most specific first.
+def _base_hermes_home() -> Path:
+    """The Hermes home a profile belongs to, with any profile suffix removed.
 
-    Order matters only for reporting which cache was hit. The important part is
-    that this covers fastembed's ACTUAL default, which is not the XDG location:
-    fastembed falls back to ``tempfile.gettempdir()/fastembed_cache``. Hermes
-    points TMPDIR at ~/.hermes/cache/scratch, so on this host the model lives at
-    ``~/.hermes/cache/scratch/fastembed_cache`` and a check that only looked at
-    ~/.cache/fastembed wrongly reported a working model as missing.
+    ``HERMES_HOME`` is ``~/.hermes/profiles/<name>`` inside a profile session.
+    Keying a durable asset off it would give every profile its own copy of the
+    same ~90 MB of weights — the duplication this pin exists to stop — and a
+    profile home carries its own scratch dir, so it would not even be safe from
+    pruning. Stripping the profile suffix makes every profile share the base
+    home's single copy. A non-profile ``HERMES_HOME`` (``/opt/hermes``) is
+    respected as-is; with no ``HERMES_HOME`` at all, ``~/.hermes``.
     """
-    roots: list[Path] = []
+    raw = os.environ.get("HERMES_HOME", "").strip()
+    if not raw:
+        return Path.home() / ".hermes"
+    home = Path(raw).expanduser()
+    if home.parent.name == "profiles":
+        return home.parent.parent
+    return home
 
-    fe_env = os.environ.get("FASTEMBED_CACHE_PATH")
-    if fe_env:
-        roots.append(Path(fe_env))
-    roots.append(Path(tempfile.gettempdir()) / "fastembed_cache")
 
-    hf_home = os.environ.get("HF_HOME")
-    if hf_home:
-        roots.append(Path(hf_home) / "hub")
+def pinned_cache_dir() -> Path:
+    """The ONE directory fastembed loads the model from and downloads into.
 
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".cache"
+    Precedence: ``FASTEMBED_CACHE_PATH`` when the operator set it, otherwise
+    ``<base hermes home>/state/qdrant/model_cache``.
 
-    roots.append(base / "fastembed")
-    roots.append(base / "huggingface" / "hub")
-    # Deduplicate while preserving order.
+    Why it is pinned at all: fastembed's own default is
+    ``tempfile.gettempdir()/fastembed_cache``, Hermes points ``TMPDIR`` at its
+    scratch tree, and ``prune_scratch_dir()`` reaps scratch entries idle for 24
+    hours (``hermes_constants.SCRATCH_MAX_IDLE_HOURS``). The weights therefore
+    vanished on every prune and were re-downloaded — once per distinct
+    ``TMPDIR``, which on 2026-09-29 meant three simultaneous copies (base
+    scratch, a profile scratch, and ``~/.hermes/tmp``). ``state/`` is not
+    reaped, and this path is identical for every profile and every process.
+    """
+    env = os.environ.get("FASTEMBED_CACHE_PATH", "").strip()
+    if env:
+        return Path(env).expanduser()
+    return _base_hermes_home() / "state" / "qdrant" / "model_cache"
+
+
+def _dedupe(roots: list[Path]) -> list[Path]:
+    """Keep order, drop repeated paths."""
     seen: set[str] = set()
     out: list[Path] = []
     for r in roots:
@@ -126,33 +142,101 @@ def _cache_roots() -> list[Path]:
     return out
 
 
-def model_is_present(model: str) -> bool:
-    """True if `model` appears to be cached on disk for either backend.
+def _hf_roots() -> list[Path]:
+    """huggingface_hub locations — what the sentence-transformers backend reads."""
+    roots: list[Path] = []
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        roots.append(Path(hf_home) / "hub")
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+    roots.append(base / "huggingface" / "hub")
+    return roots
 
-    Deliberately conservative: it only answers "can we be reasonably sure the
-    weights are local", and callers treat a False as "offer to download" rather
-    than as a hard failure. A backend that does not use a plain directory cache
-    is not falsely reported as missing — absence of a match returns False, and
-    the caller lets the backend itself try the load.
+
+def _roots_for(backend: str) -> list[Path]:
+    """Where `backend`'s LOAD path looks; the first entry is authoritative.
+
+    fastembed: exactly one directory, because ``Embedder._build()`` passes it
+    as ``cache_dir`` — a copy anywhere else is never read, so reporting one as
+    present would promise a download-free embed that then downloads.
+    sentence-transformers: the huggingface_hub locations it reads.
     """
-    if not model:
-        return False
-    needle = model.split("/")[-1].lower()
-    for root in _cache_roots():
+    if backend == BACKEND_FASTEMBED:
+        return [pinned_cache_dir()]
+    return _dedupe(_hf_roots())
+
+
+def _cache_roots() -> list[Path]:
+    """Every directory a model copy may live in, most authoritative first.
+
+    ``_roots_for()`` decides "will it load"; this wider list exists so a report
+    can NAME a stale copy instead of silently downloading a second one beside
+    it. It keeps fastembed's own fallback
+    (``tempfile.gettempdir()/fastembed_cache``) — which is NOT the XDG
+    ``~cache/fastembed``, so a check that only looked there reported a working
+    model as missing — and the huggingface_hub locations.
+    """
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+    return _dedupe(
+        [
+            pinned_cache_dir(),
+            Path(tempfile.gettempdir()) / "fastembed_cache",
+            *_hf_roots(),
+            base / "fastembed",
+        ]
+    )
+
+
+def _roots_containing(roots: list[Path], needle: str) -> list[Path]:
+    """Subset of `roots` whose entries match `needle`; unreadable roots skipped."""
+    hits: list[Path] = []
+    for root in roots:
         if not root.is_dir():
             continue
         try:
             for entry in root.iterdir():
                 if needle in entry.name.lower():
-                    return True
+                    hits.append(root)
+                    break
         except OSError:
             continue
-    return False
+    return hits
 
 
-def model_cache_dir() -> str:
-    """The directory a downloaded model would live in (for user-facing reports)."""
-    roots = _cache_roots()
+def model_is_present(model: str, backend: str = BACKEND_FASTEMBED) -> bool:
+    """True when the weights sit where `backend` will actually LOAD them.
+
+    Deliberately not "anywhere on disk": callers treat True as "no download
+    needed", so a copy stranded in a prunable ``$TMPDIR`` — which a pinned
+    fastembed never reads — must not count as present. Use
+    :func:`model_cache_locations` to list every copy including stale ones, and
+    :func:`_cache_roots` for the full search. Absence of a match returns False
+    and the caller lets the backend itself try the load.
+    """
+    if not model:
+        return False
+    needle = model.split("/")[-1].lower()
+    return bool(_roots_containing(_roots_for(backend), needle))
+
+
+def model_cache_locations(model: str) -> list[Path]:
+    """Every cache root currently holding `model`, most authoritative first.
+
+    This is what makes a re-download explainable rather than silent: a report
+    can say "a copy exists in <stale path>, but the pinned cache <path> is
+    empty, so it will be fetched there".
+    """
+    if not model:
+        return []
+    needle = model.split("/")[-1].lower()
+    return _roots_containing(_cache_roots(), needle)
+
+
+def model_cache_dir(backend: str = BACKEND_FASTEMBED) -> str:
+    """The directory the model is loaded from / downloaded to (for reports)."""
+    roots = _roots_for(backend)
     return str(roots[0]) if roots else ""
 
 
@@ -204,7 +288,16 @@ class Embedder:
                     "'sentence-transformers'.",
                     model=self.model, backend=self.backend,
                 ) from e
-            kwargs: dict[str, Any] = {"model_name": self.model}
+            kwargs: dict[str, Any] = {
+                "model_name": self.model,
+                # Pass the cache dir EXPLICITLY. fastembed otherwise falls back
+                # to tempfile.gettempdir()/fastembed_cache, which Hermes prunes
+                # after 24 h idle — so the ~90 MB weights were re-downloaded on
+                # every prune, once per distinct TMPDIR. Handing it the same
+                # value model_is_present() checks is what keeps "present" and
+                # "loadable" from drifting apart.
+                "cache_dir": str(pinned_cache_dir()),
+            }
             # fastembed picks CPU by default; only pin a device when asked.
             if self.device in ("cuda", "gpu"):
                 providers = self._cuda_providers()
