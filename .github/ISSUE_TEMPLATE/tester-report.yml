@@ -1,0 +1,61 @@
+name: Qdrant memory provider — test report
+description: Report a successful or failed install/test of the qdrant memory plugin. Filling this in helps us verify across platforms.
+title: "[test] <host OS / method> — <PASS|FAIL>"
+labels: ["tester-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! Fill in the fields below. The more you give, the better we can confirm the plugin works on your setup.
+        If something failed, the answers are still valuable — a FAIL is a real finding.
+  - type: input
+    id: os
+    attributes:
+      label: Host OS
+      description: e.g. Ubuntu 24.04, Windows 11 x86_64, macOS 14 arm64
+      placeholder: "Ubuntu 24.04 x86_64"
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version (Hermes interpreter)
+      description: Run 'hermes --version' and note the python version if visible.
+      placeholder: "3.11"
+  - type: input
+    id: install
+    attributes:
+      label: Install command used
+      description: e.g. 'hermes plugins install qdrant'
+      placeholder: "hermes plugins install qdrant"
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      description: Did the plugin install, activate, and recall correctly?
+      options:
+        - "PASS — install & recall both work"
+        - "PASS — install works, recall not yet tested"
+        - "FAIL — install/activation failed"
+        - "FAIL — install ok but recall broken"
+    validations:
+      required: true
+  - type: textarea
+    id: validate
+    attributes:
+      label: "hermes plugins validate output"
+      description: Paste the output of 'hermes plugins validate' (if it ran). A pass still prints warnings — include them.
+      render: shell
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / error output
+      description: Any errors, tracebacks, or observations. Quote exact messages.
+  - type: input
+    id: qdrant
+    attributes:
+      label: Qdrant host
+      description: localhost (Docker/native) or a URL? Did you need an API key?
+      placeholder: "localhost:6333 (docker)"
