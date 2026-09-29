@@ -19,10 +19,10 @@ Initial standalone release of the Qdrant memory provider for Hermes Agent.
 - Honest availability reporting: `is_available()` (config-only, no network),
   `check_backend()` (real probe) and `unavailable_reason()` (user-facing
   diagnosis) distinguish a misconfiguration from a dead server.
-- Four agent tools: `qdrant_search`, `qdrant_upsert`, `qdrant_recall`,
-  `qdrant_collect`.
-- `hermes memory setup` schema via `get_config_schema()` / `save_config()`, and
-  the `qdrant` provider CLI subcommand.
+- Five agent tools: `qdrant_search`, `qdrant_upsert`, `qdrant_recall`,
+  `qdrant_collect`, `qdrant_prepare`.
+- `hermes memory setup` schema via `get_config_schema()` / `save_config()`.
+  There is no `hermes qdrant` CLI subcommand; the provider registers no CLI.
 - Configuration precedence: `QDRANT_URL` / `QDRANT_API_KEY` env (secrets) →
   `memory.qdrant:` in `config.yaml` → `config.json` next to the module.
 

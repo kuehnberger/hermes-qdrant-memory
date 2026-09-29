@@ -20,8 +20,9 @@ session.
 - **Honest availability** — `is_available()` / `check_backend()` /
   `unavailable_reason()` distinguish a bad config from a dead server, so
   `hermes memory status` can tell you which one you have.
-- **4 agent tools**: `qdrant_search`, `qdrant_upsert`, `qdrant_recall`,
-  `qdrant_collect` (read-only).
+- **5 agent tools**: `qdrant_search`, `qdrant_upsert`, `qdrant_recall`,
+  `qdrant_collect` (read-only), `qdrant_prepare` (reports the model's
+  dimensions and cache location before you commit to a collection).
 
 ## Requirements
 
@@ -80,14 +81,32 @@ session.
 
 ## Setup
 
+Start a server first — the provider is REST-only and always needs a reachable
+Qdrant (there is no embedded mode):
+
 ```bash
-hermes memory setup --provider qdrant
-hermes memory provider qdrant
+docker run -p 6333:6333 qdrant/qdrant
 ```
 
-The setup wizard writes the config and probes the server. To configure by hand,
-create `config.json` next to the plugin's `__init__.py` (it is `.gitignore`d and
-chmod 0600, because it can hold an API key):
+Then install and configure in one step:
+
+```bash
+hermes plugins install qdrant
+hermes memory setup            # pick "qdrant" in the picker
+```
+
+The picker walks the config fields, probes the server, and sets
+`memory.provider: qdrant`. To skip the picker — the provider name is a
+**positional** argument, there is no `--provider` flag:
+
+```bash
+hermes memory setup qdrant
+```
+
+That path activates the provider and installs its dependencies, but it does
+**not** prompt for settings. To configure by hand, create `config.json` next to
+the plugin's `__init__.py` (it is `.gitignore`d and chmod 0600, because it can
+hold an API key):
 
 ```json
 {
@@ -98,9 +117,12 @@ chmod 0600, because it can hold an API key):
 }
 ```
 
-Or set `memory.provider: qdrant` in `config.yaml`. `QDRANT_URL` and
-`QDRANT_API_KEY` are optional environment overrides — a local server on the
-default URL needs neither.
+Verify with `hermes memory status`. `QDRANT_URL` and `QDRANT_API_KEY` are
+optional environment overrides — a local server on the default URL needs
+neither.
+
+> **There is no `hermes qdrant` CLI.** This plugin registers no CLI commands;
+> everything is reached through the five agent tools and `hermes memory status`.
 
 ## Configuration
 
