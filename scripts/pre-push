@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Pre-push gate for hermes-qdrant-memory
+# Runs the four mandatory checks before allowing a push to main.
+#
+# Install: cp scripts/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+# Or add to your CI when the repo goes public.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Only run on pushes to main (or any branch you protect)
+while read local_ref local_sha remote_ref remote_sha; do
+    if [[ "$remote_ref" == "refs/heads/main" ]]; then
+        echo "=== pre-push: protecting main ==="
+    else
+        echo "=== pre-push: skipping (not main) ==="
+        exit 0
+    fi
+done
+
+echo "1/4: docs honesty gate..."
+python3 scripts/check_docs_honesty.py || exit 1
+
+echo "2/4: tree-rules gate..."
+python3 -m pytest tests/test_tree_rules.py -q || exit 1
+
+echo "3/4: full test suite..."
+python3 -m pytest -q || exit 1
+
+echo "4/4: plugin validation..."
+hermes plugins validate . || exit 1
+
+echo "=== pre-push: all gates passed ==="
