@@ -10,6 +10,11 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# Use the hermes venv python (pytest is not installed in system python3)
+# The `hermes` CLI is installed separately in /home/gk/.local/bin/hermes
+PY="/home/gk/.hermes/hermes-agent/venv/bin/python"
+HERMES="/home/gk/.local/bin/hermes"
+
 # Only run on pushes to main (or any branch you protect)
 while read local_ref local_sha remote_ref remote_sha; do
     if [[ "$remote_ref" == "refs/heads/main" ]]; then
@@ -21,15 +26,15 @@ while read local_ref local_sha remote_ref remote_sha; do
 done
 
 echo "1/4: docs honesty gate..."
-python3 scripts/check_docs_honesty.py || exit 1
+"$PY" scripts/check_docs_honesty.py || exit 1
 
 echo "2/4: tree-rules gate..."
-python3 -m pytest tests/test_tree_rules.py -q || exit 1
+"$PY" -m pytest tests/test_tree_rules.py -q || exit 1
 
 echo "3/4: full test suite..."
-python3 -m pytest -q || exit 1
+"$PY" -m pytest -q || exit 1
 
 echo "4/4: plugin validation..."
-hermes plugins validate . || exit 1
+"$HERMES" plugins validate . || exit 1
 
 echo "=== pre-push: all gates passed ==="
