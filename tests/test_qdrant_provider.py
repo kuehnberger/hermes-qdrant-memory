@@ -307,7 +307,7 @@ class TestQdrantConfigSchemaContract:
         fields = _normalize_memory_provider_schema("qdrant", qdrant_provider)
         assert {f["key"] for f in fields} == {
             "url", "api_key", "collection", "vector_size", "distance",
-            "embedder", "model", "device"}
+            "embedder", "model", "device", "progress"}
 
     def test_secret_field_declares_env_var(self, qdrant_provider):
         """Secrets route to .env through the field's env_var, not a config key."""
@@ -864,7 +864,103 @@ class TestStoredVectorParity:
         try:
             assert not client.collection_exists(self.COLLECTION), (
                 f"{self.COLLECTION} survived a test run — the test is leaking a "
-                "collection into the live server"
+                f"collection into the live server"
             )
         finally:
             client.close()
+
+
+# ---------------------------------------------------------------------------
+# Progress display
+# ---------------------------------------------------------------------------
+
+class TestProgressDisplay:
+    """Tests for the progress display feature (status_callback emission)."""
+
+    def test_progress_mode_defaults_to_minimal(self, qdrant_provider):
+        assert qdrant_provider._progress_mode == "minimal"
+
+    def test_progress_mode_can_be_set_to_off(self, tmp_path, monkeypatch):
+        """Progress mode 'off' disables all progress events."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        from plugins.memory.qdrant import QdrantMemoryProvider
+        p = QdrantMemoryProvider(config={"progress": "off"})
+        assert p._progress_mode == "off"
+
+    def test_progress_mode_can_be_set_to_verbose(self, tmp_path, monkeypatch):
+        """Progress mode 'verbose' enables all progress events."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        from plugins.memory.qdrant import QdrantMemoryProvider
+        p = QdrantMemoryProvider(config={"progress": "verbose"})
+        assert p._progress_mode == "verbose"
+
+    def test_emit_progress_respects_off_mode(self, qdrant_provider):
+        """No events emitted when mode is 'off'."""
+        qdrant_provider._progress_mode = "off"
+        qdrant_provider._status_callback = MagicMock()
+        qdrant_provider._emit_progress("memory_sync", "test")
+        qdrant_provider._status_callback.assert_not_called()
+
+    def test_emit_progress_respects_minimal_mode(self, qdrant_provider):
+        """Only completion events emitted when mode is 'minimal'."""
+        qdrant_provider._progress_mode = "minimal"
+        qdrant_provider._status_callback = MagicMock()
+        # Verbose events are suppressed in minimal mode
+        qdrant_provider._emit_progress("memory_sync", "test", verbose=True)
+        qdrant_provider._status_callback.assert_not_called()
+        # Completion events are emitted
+        qdrant_provider._emit_progress("memory_sync", "test")
+        qdrant_provider._status_callback.assert_called_once()
+
+    def test_emit_progress_respects_verbose_mode(self, qdrant_provider):
+        """All events emitted when mode is 'verbose'."""
+        qdrant_provider._progress_mode = "verbose"
+        qdrant_provider._status_callback = MagicMock()
+        qdrant_provider._emit_progress("memory_sync", "test", verbose=True)
+        qdrant_provider._status_callback.assert_called_once()
+
+    def test_emit_progress_no_callback_is_safe(self, qdrant_provider):
+        """No error when status_callback is None."""
+        qdrant_provider._status_callback = None
+        qdrant_provider._emit_progress("memory_sync", "test")  # must not raise
+
+    def test_emit_progress_callback_exception_is_swallowed(self, qdrant_provider):
+        """A failing status_callback must not break memory operations."""
+        qdrant_provider._status_callback = MagicMock(side_effect=RuntimeError("boom"))
+        qdrant_provider._emit_progress("memory_sync", "test")  # must not raise
+
+    def test_initialize_stores_status_callback(self, qdrant_provider, monkeypatch):
+        """initialize() stores status_callback from kwargs."""
+        callback = MagicMock()
+        qdrant_provider._status_callback = None
+        # Mock the QdrantClient to avoid needing a real server
+        mock_client = MagicMock()
+        mock_client.get_collections.return_value = MagicMock(collections=[])
+        monkeypatch.setattr("qdrant_client.QdrantClient", lambda **kw: mock_client)
+        qdrant_provider.initialize("test-session", status_callback=callback)
+        assert qdrant_provider._status_callback is callback
+
+    def test_recall_status_returns_last_count(self, qdrant_provider):
+        """recall_status returns the actual recall count."""
+        qdrant_provider._last_recall_count = 5
+        status = qdrant_provider.recall_status()
+        assert status.count == 5
+
+    def test_recall_status_default_count_is_zero(self, qdrant_provider):
+        """recall_status returns 0 when no prefetch has run."""
+        qdrant_provider._last_recall_count = 0
+        status = qdrant_provider.recall_status()
+        assert status.count == 0
+
+    def test_progress_config_field_in_schema(self, qdrant_provider):
+        """The progress config field is in the schema."""
+        schema = qdrant_provider.get_config_schema()
+        keys = [f["key"] for f in schema]
+        assert "progress" in keys
+
+    def test_progress_config_field_has_correct_choices(self, qdrant_provider):
+        """The progress config field has off/minimal/verbose choices."""
+        schema = qdrant_provider.get_config_schema()
+        progress_field = next(f for f in schema if f["key"] == "progress")
+        assert progress_field["choices"] == ["off", "minimal", "verbose"]
+        assert progress_field["default"] == "minimal"

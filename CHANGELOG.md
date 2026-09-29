@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [semantic versioning](https://semver.org/).
 
+## [0.1.1] — 2026-09-29
+
+### Added
+
+- **Progress display** — optional status events during memory operations.
+  `sync_turn` and `prefetch` now emit `status_callback` events that the
+  CLI/TUI renders as `💾 qdrant — stored (127,778 points)` and
+  `💾 qdrant — recalled 3 memories`. Controlled by the `progress` config key:
+  `off`, `minimal` (default, completion events only), `verbose` (start +
+  completion events). The callback is stored from `initialize()` kwargs and
+  never blocks memory operations.
+- `recall_status()` now returns the actual recall count from the last
+  `prefetch` call, so the recall indicator shows a real number.
+
 ## [0.1.0] — 2026-09-26
 
 Initial standalone release of the Qdrant memory provider for Hermes Agent.

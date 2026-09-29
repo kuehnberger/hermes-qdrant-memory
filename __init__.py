@@ -201,6 +201,13 @@ class QdrantMemoryProvider(MemoryProvider):
         # Last real backend probe result ("" = unknown/ok, else a message).
         # Only set by check_backend()/initialize(); never guessed.
         self._backend_error: str = ""
+        # Progress display: status_callback is passed to initialize() by the
+        # orchestrator (agent_init.py:1284). We store it and emit progress
+        # events during sync_turn / prefetch so the user sees the plugin
+        # working. Mode is controlled by config: "off" | "minimal" | "verbose".
+        self._status_callback: Any = None
+        self._progress_mode: str = self._config.get("progress", "minimal")
+        self._last_recall_count: int = 0
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -293,6 +300,12 @@ class QdrantMemoryProvider(MemoryProvider):
             timeout=kwargs.get("timeout", 30),
         )
 
+        # Store status_callback for progress display. The orchestrator passes it
+        # (agent_init.py:1284) so the plugin can emit progress events that the
+        # CLI/TUI/gateway renders. We never call it directly — only through
+        # _emit_progress() which respects the progress mode config.
+        self._status_callback = kwargs.get("status_callback")
+
         # Create collection if it doesn't exist.
         # The collection MUST declare a NAMED vector "dense" because sync_turn /
         # add_memory / search all upsert and query with vector={"dense": [...]} and
@@ -362,6 +375,8 @@ class QdrantMemoryProvider(MemoryProvider):
             logger.debug("Circuit breaker open — skipping prefetch")
             return ""
 
+        self._emit_progress("memory_sync", "💾 qdrant — retrieving...", verbose=True)
+
         try:
             # Encode query via the configured embedder. A failure raises, and
             # is logged below — it is never swallowed into a silent "".
@@ -392,6 +407,13 @@ class QdrantMemoryProvider(MemoryProvider):
                 text = payload.get("text", "")
                 if text:
                     lines.append(f"- [{score:.2f}] {text}")
+
+            count = len(lines)
+            self._last_recall_count = count
+            if count > 0:
+                self._emit_progress("memory_sync", f"💾 qdrant — recalled {count} memor{'y' if count == 1 else 'ies'}")
+            else:
+                self._emit_progress("memory_sync", "💾 qdrant — no relevant memories")
 
             return "\n".join(lines) if lines else ""
 
@@ -438,7 +460,7 @@ class QdrantMemoryProvider(MemoryProvider):
         """Return current recall state."""
         return RecallStatus(
             provider_label=self.name,
-            count=0,
+            count=self._last_recall_count,
             glyph="📖",
         )
 
@@ -461,6 +483,8 @@ class QdrantMemoryProvider(MemoryProvider):
         if self._is_breaker_open():
             logger.debug("Circuit breaker open — skipping sync_turn")
             return
+
+        self._emit_progress("memory_sync", "💾 qdrant — storing turn...", verbose=True)
 
         try:
             # Combine user + assistant for embedding
@@ -488,6 +512,14 @@ class QdrantMemoryProvider(MemoryProvider):
                 wait=True,
             )
             self._record_success()
+
+            # Get the total point count for the progress message
+            try:
+                info = self._client.get_collection(self._collection)
+                count = info.points_count
+                self._emit_progress("memory_sync", f"💾 qdrant — stored ({count:,} points)")
+            except Exception:
+                self._emit_progress("memory_sync", "💾 qdrant — stored")
 
         except Exception as e:
             self._record_failure()
@@ -772,6 +804,18 @@ class QdrantMemoryProvider(MemoryProvider):
                     "loudly if none is present."
                 ),
             },
+            {
+                "key": "progress",
+                "label": "Progress Display",
+                "type": "select",
+                "default": "minimal",
+                "choices": ["off", "minimal", "verbose"],
+                "description": (
+                    "Progress display for memory operations. 'off' shows nothing. "
+                    "'minimal' shows completion events (stored, recalled N). "
+                    "'verbose' also shows start events (storing..., retrieving...)."
+                ),
+            },
         ]
 
     # -- Internal helpers ----------------------------------------------------
@@ -992,6 +1036,33 @@ class QdrantMemoryProvider(MemoryProvider):
             import time
             self._breaker_open_until = time.time() + self._BREAKER_COOLDOWN_SECS
             logger.warning("Circuit breaker OPEN for %ds", self._BREAKER_COOLDOWN_SECS)
+
+    # -- Progress display ----------------------------------------------------
+
+    def _emit_progress(self, event_type: str, message: str, *, verbose: bool = False) -> None:
+        """Emit a progress event via status_callback if enabled.
+
+        The progress mode controls what is shown:
+        - "off": no progress events
+        - "minimal": only completion events (default)
+        - "verbose": both start and completion events
+
+        This is called from sync_turn and prefetch to give the user visible
+        feedback that the memory plugin is working. The status_callback is
+        passed by the orchestrator (agent_init.py:1284) and renders in the
+        CLI/TUI/gateway interface.
+        """
+        if self._progress_mode == "off":
+            return
+        if verbose and self._progress_mode != "verbose":
+            return
+        if self._status_callback is None:
+            return
+        try:
+            self._status_callback(event_type, message)
+        except Exception:
+            # A progress display failure must never break memory operations
+            pass
 
 
 # ---------------------------------------------------------------------------

@@ -23,6 +23,11 @@ session.
 - **5 agent tools**: `qdrant_search`, `qdrant_upsert`, `qdrant_recall`,
   `qdrant_collect` (read-only), `qdrant_prepare` (reports the model's
   dimensions and cache location before you commit to a collection).
+- **Progress display** — optional status events during memory operations.
+  When enabled, the CLI/TUI shows `💾 qdrant — stored (127,778 points)` after
+  each turn and `💾 qdrant — recalled 3 memories` after each retrieval.
+  Controlled by the `progress` config key: `off`, `minimal` (default),
+  `verbose` (start + completion events).
 
 ## Requirements
 
