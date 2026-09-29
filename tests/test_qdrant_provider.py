@@ -30,8 +30,28 @@ def _isolate_qdrant_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def qdrant_provider():
-    """Return a fresh QdrantMemoryProvider instance."""
+def qdrant_provider(monkeypatch):
+    """A fresh provider built from DEFAULTS — never from operator state.
+
+    The provider's config is ``config.json`` sitting next to the module plus
+    the ``memory.qdrant:`` overlay in config.yaml, both read by
+    ``_load_plugin_config()``. On a configured install that is somebody else's
+    state, not test input: live config.json read ``{"progress": "verbose"}``
+    (written by ``hermes memory setup`` on 2026-09-29), which made
+    ``test_progress_mode_defaults_to_minimal`` fail here while passing in the
+    repo — a red suite nobody could attribute to the code under test.
+
+    ``config={}`` is NOT a way to opt out. ``__init__`` reads
+    ``config or _load_plugin_config()``, and the empty dict is falsy *on
+    purpose* — that fall-through is what lets a config.yaml-less install pick
+    up its own ``config.json`` — so ``QdrantMemoryProvider(config={})`` still
+    loads the live file (verified: it returned ``verbose`` on the live install
+    with the config.json shown above). The loader is
+    stubbed instead. Config-loading behaviour itself is covered by
+    ``TestQdrantConfigLoading``, which points the loader at a tmp dir.
+    """
+    import plugins.memory.qdrant as mod
+    monkeypatch.setattr(mod, "_load_plugin_config", lambda: {})
     from plugins.memory.qdrant import QdrantMemoryProvider
     return QdrantMemoryProvider()
 
@@ -388,6 +408,23 @@ class TestQdrantConfigLoading:
 
         p2 = QdrantMemoryProvider()
         assert p2._collection == "roundtrip"
+
+    def test_progress_from_config_json_reaches_the_provider(self, tmp_path,
+                                                             monkeypatch):
+        """A ``progress`` mode written by the wizard must override the default.
+
+        The inverse of ``test_progress_mode_defaults_to_minimal``: on a live
+        install config.json says ``{"progress": "verbose"}`` and the provider
+        must honour it. That is correct production behaviour — the bug was the
+        default test reading the file, not the file being read.
+        """
+        import plugins.memory.qdrant as mod
+        cfg = self._write_config(tmp_path, {"progress": "verbose"})
+        monkeypatch.setattr(mod, "_config_json_path", lambda: cfg / "config.json")
+
+        from plugins.memory.qdrant import QdrantMemoryProvider
+        p = QdrantMemoryProvider()
+        assert p._progress_mode == "verbose"
 
 
 # ---------------------------------------------------------------------------
@@ -981,6 +1018,12 @@ class TestProgressDisplay:
     """Tests for the progress display feature (status_callback emission)."""
 
     def test_progress_mode_defaults_to_minimal(self, qdrant_provider):
+        """Contract: no ``progress`` key configured => mode ``"minimal"``.
+
+        The fixture supplies no config at all, so this really is the default
+        branch — it must not depend on whether the machine running the suite
+        has a config.json (see the fixture's docstring).
+        """
         assert qdrant_provider._progress_mode == "minimal"
 
     def test_progress_mode_can_be_set_to_off(self, tmp_path, monkeypatch):

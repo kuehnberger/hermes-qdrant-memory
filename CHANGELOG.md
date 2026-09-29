@@ -28,6 +28,15 @@ All notable changes to this project are documented here. The format is based on
   pin, so every test downloaded its own copy: four suite runs left 54 copies
   / 1.8 GB under `$TMPDIR/pytest-of-gk`. The suite now runs in 54 s instead
   of 167 s and writes no model weights of its own.
+- The default-progress test no longer reads the install's own `config.json`.
+  `QdrantMemoryProvider.__init__` falls through `config or _load_plugin_config()`,
+  so the previously suggested `config={}` opt-out still loaded the live file: on
+  a configured install (`{"progress": "verbose"}`, written by
+  `hermes memory setup`) `test_progress_mode_defaults_to_minimal` failed while
+  the same suite passed in a fresh checkout — a red suite that had nothing to
+  do with the code under test. The shared provider fixture now stubs
+  `_load_plugin_config()`, and `TestQdrantConfigLoading` covers the inverse
+  contract: a `progress` mode written to `config.json` must reach the provider.
 
 ## [0.1.1] — 2026-09-29
 
