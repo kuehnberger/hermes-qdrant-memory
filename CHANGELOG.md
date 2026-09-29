@@ -23,6 +23,11 @@ All notable changes to this project are documented here. The format is based on
   while the load path is empty. Stale copies stay visible through
   `model_cache_locations()`, and `qdrant_prepare` names them instead of
   silently downloading a second copy beside them.
+- The test session pins `FASTEMBED_CACHE_PATH` for the whole run. The
+  per-test `HERMES_HOME` isolation was giving each embedding test an empty
+  pin, so every test downloaded its own copy: four suite runs left 54 copies
+  / 1.8 GB under `$TMPDIR/pytest-of-gk`. The suite now runs in 54 s instead
+  of 167 s and writes no model weights of its own.
 
 ## [0.1.1] — 2026-09-29
 

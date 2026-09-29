@@ -334,7 +334,37 @@ _register_plugin_package()
 
 
 # ---------------------------------------------------------------------------
-# 3. Live-server gate
+# 3. One model cache for the whole session
+# ---------------------------------------------------------------------------
+
+
+def _pin_session_model_cache() -> None:
+    """Point every test at ONE model cache instead of one per test.
+
+    The provider pins its weights to ``<home>/state/qdrant/model_cache``, and
+    the ``_isolate_qdrant_home`` fixture hands each test its own
+    ``HERMES_HOME`` — hence its own empty pin. Any test that really loads the
+    model would then download its own 87 MB copy: measured on 2026-09-29, four
+    suite runs left 54 copies (1.8 GB) under ``$TMPDIR/pytest-of-gk``.
+
+    ``FASTEMBED_CACHE_PATH`` is the override ``pinned_cache_dir()`` honours
+    first, so setting it here — once, at collection time, while ``HERMES_HOME``
+    is still the real session value — makes every test share the cache the live
+    install already has. An operator-set value is left alone. A machine with an
+    empty cache downloads once, exactly like production's first embed.
+    """
+    if os.environ.get("FASTEMBED_CACHE_PATH", "").strip():
+        return
+    from plugins.memory.qdrant import pinned_cache_dir
+
+    os.environ["FASTEMBED_CACHE_PATH"] = str(pinned_cache_dir())
+
+
+_pin_session_model_cache()
+
+
+# ---------------------------------------------------------------------------
+# 4. Live-server gate
 # ---------------------------------------------------------------------------
 
 

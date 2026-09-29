@@ -570,6 +570,7 @@ class TestEmbedderContract:
 # Embedder parity — the guard against a silent model swap
 # ---------------------------------------------------------------------------
 
+@pytest.mark.allow_real_home_io
 class TestEmbedderParity:
     """A runtime swap must not change the vector space.
 
@@ -578,6 +579,10 @@ class TestEmbedderParity:
     all-MiniLM-L6-v2). That is the whole reason no re-ingest is required, so it
     is asserted rather than assumed: a future model-name typo fails here loudly
     instead of degrading recall with no signal anywhere.
+
+    Marked ``allow_real_home_io`` because it reads the model cache the live
+    install uses — the session-wide pin in ``conftest.py`` — rather than a
+    per-test copy.
     """
 
     PROBES = [
@@ -589,7 +594,7 @@ class TestEmbedderParity:
     def _cos(self, a, b):
         dot = sum(x * y for x, y in zip(a, b))
         na = sum(x * x for x in a) ** 0.5
-        nb = sum(x * x for x in b) ** 0.5
+        nb = sum(y * y for y in b) ** 0.5
         return dot / (na * nb) if na and nb else 0.0
 
     @pytest.fixture(autouse=True)
@@ -601,8 +606,12 @@ class TestEmbedderParity:
         self._fe, self._st = fe, st
 
     def test_backends_agree_on_the_same_model(self):
-        from plugins.memory.qdrant import DEFAULT_MODEL
-        fe = self._fe.TextEmbedding(model_name=DEFAULT_MODEL)
+        from plugins.memory.qdrant import DEFAULT_MODEL, pinned_cache_dir
+        # cache_dir is the same pin Embedder._build() uses: without it fastembed
+        # falls back to $TMPDIR/fastembed_cache and this test silently pulls a
+        # second copy of the weights into prunable scratch on every run.
+        fe = self._fe.TextEmbedding(model_name=DEFAULT_MODEL,
+                                    cache_dir=str(pinned_cache_dir()))
         st = self._st.SentenceTransformer("all-MiniLM-L6-v2")
         for text in self.PROBES:
             a = next(iter(fe.passage_embed([text]))).tolist()
@@ -614,8 +623,9 @@ class TestEmbedderParity:
             )
 
     def test_dimensions_match(self):
-        from plugins.memory.qdrant import DEFAULT_MODEL
-        fe = self._fe.TextEmbedding(model_name=DEFAULT_MODEL)
+        from plugins.memory.qdrant import DEFAULT_MODEL, pinned_cache_dir
+        fe = self._fe.TextEmbedding(model_name=DEFAULT_MODEL,
+                                    cache_dir=str(pinned_cache_dir()))
         st = self._st.SentenceTransformer("all-MiniLM-L6-v2")
         a = next(iter(fe.passage_embed(["dimension probe"]))).tolist()
         b = st.encode("dimension probe", normalize_embeddings=True).tolist()
