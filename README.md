@@ -46,7 +46,7 @@ session.
   | package | constraint | why |
   |---|---|---|
   | `qdrant-client` | `>=1.10.0,<2` | 1.10.0 is the oldest floor with `query_points` / `Prefetch` / `FusionQuery` |
-  | `fastembed` | `>=0.4.0` | default embedder — ONNX, no torch, ~230 MB RSS |
+  | `fastembed` | `>=0.4.0` | default embedder — ONNX, no torch, ~287 MB peak RSS |
   | `sentence-transformers` | `>=2.7.0,<7` | opt-in GPU backend — **heavy**, see below |
 
 `torch` comes in transitively and is intentionally not pinned here.
@@ -153,7 +153,7 @@ Local, at **384 dimensions**, via one of two backends:
 
 | backend | requires | when to pick it |
 |---|---|---|
-| `fastembed` (default) | `fastembed` only — ONNX, no torch | CPU hosts; ~230 MB RSS, no torch install |
+| `fastembed` (default) | `fastembed` only — ONNX, no torch | CPU hosts; ~287 MB peak RSS, no torch install |
 | `sentence-transformers` | `torch` + CUDA wheels (~5.3 GB) | GPU hosts needing CUDA, or models outside fastembed's catalog |
 
 Both are pinned to `sentence-transformers/all-MiniLM-L6-v2` by default, and
@@ -176,6 +176,24 @@ reports the model's dimensions and cache location before you commit to that.
 
 If you change `vector_size` away from 384 you must also supply a matching
 embedding model; the mismatch surfaces as a write error, not a config error.
+
+## Back up, restore, move
+
+Memories live in the Qdrant collection — the plugin keeps no local state
+besides `config.json`, so moving or backing up means moving the server's data:
+
+- **Snapshot** (recommended): `POST /collections/<name>/snapshots` (dashboard
+  UI does the same) writes a snapshot file **including vectors** — restoring it
+  needs no re-embedding. Measured: ~408 MB for a 127k-point collection.
+- **Docker volume:** the default `qdrant/qdrant` image stores everything under
+  `/qdrant/storage` — copy the volume, or `docker cp` it out, and the whole
+  memory moves with it.
+- **`hermes backup` does not carry your points.** This provider reports no
+  `backup_paths()`, so `hermes backup` captures config only; back the server up
+  separately (snapshot or volume).
+
+To verify a restore: `qdrant_collect(action="info")` shows the point count,
+and a session recall should return the same lines as before the move.
 
 ## Not implemented
 

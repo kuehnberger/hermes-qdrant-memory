@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from plugins.memory.qdrant import EmbeddingError, model_is_present
+from plugins.memory.qdrant import QdrantMemoryProvider
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1110,3 +1111,100 @@ class TestProgressDisplay:
         progress_field = next(f for f in schema if f["key"] == "progress")
         assert progress_field["choices"] == ["off", "minimal", "verbose"]
         assert progress_field["default"] == "minimal"
+
+
+# ---------------------------------------------------------------------------
+# 0.1.2 surface: dedup, status bookkeeping, config-key hygiene
+# ---------------------------------------------------------------------------
+
+class TestPrefetchDedup:
+    """_dedup_hits must drop near-copies and keep distinct hits."""
+
+    def test_exact_duplicate_dropped_keeps_first(self):
+        pairs = [(0.90, "the user prefers dark mode"), (0.85, "user prefers dark mode")]
+        kept = QdrantMemoryProvider._dedup_hits(pairs)
+        assert len(kept) == 1
+        assert kept[0][0] == 0.90, "the higher-scoring first hit must survive"
+
+    def test_distinct_hits_all_kept(self):
+        pairs = [
+            (0.9, "the user prefers dark mode"),
+            (0.8, "deployment target is a debian vps in frankfurt"),
+            (0.7, "meeting with the design team on fridays"),
+        ]
+        assert len(QdrantMemoryProvider._dedup_hits(pairs)) == 3
+
+    def test_contained_short_line_dropped(self):
+        # second line is a subset of the first -> containment >= 0.86
+        pairs = [
+            (0.9, "qdrant server runs on port 6333 via docker compose stack"),
+            (0.8, "qdrant server runs on port 6333 via docker compose"),
+        ]
+        assert len(QdrantMemoryProvider._dedup_hits(pairs)) == 1
+
+    def test_empty_text_dropped(self):
+        pairs = [(0.9, ""), (0.9, "keep me")]
+        assert QdrantMemoryProvider._dedup_hits(pairs) == [(0.9, "keep me")]
+
+
+class TestStatusBookkeeping:
+    """status.json answers 'when did this last store/recall?' from a fresh process."""
+
+    def test_note_status_roundtrip(self, qdrant_provider, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            QdrantMemoryProvider, "_status_json_path",
+            staticmethod(lambda: tmp_path / "status.json"),
+        )
+        qdrant_provider._note_status(last_store="2026-09-30T00:00:00", last_store_ms=42)
+        qdrant_provider._note_status(last_recall_count=3)
+        state = json.loads((tmp_path / "status.json").read_text())
+        assert state["last_store"] == "2026-09-30T00:00:00"
+        assert state["last_store_ms"] == 42
+        assert state["last_recall_count"] == 3, "later notes must merge, not replace"
+
+    def test_note_status_failure_is_silent(self, qdrant_provider, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            QdrantMemoryProvider, "_status_json_path",
+            staticmethod(lambda: tmp_path / "no-such-dir" / "status.json"),
+        )
+        qdrant_provider._note_status(last_store="x")  # parent dir missing — must not raise
+
+    def test_get_status_config_shows_config_and_state(self, qdrant_provider, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            QdrantMemoryProvider, "_status_json_path",
+            staticmethod(lambda: tmp_path / "status.json"),
+        )
+        qdrant_provider._note_status(last_recall_count=7)
+        display = qdrant_provider.get_status_config({"url": "http://localhost:6333"})
+        assert display["url"] == "http://localhost:6333"
+        assert display["collection"] == "hermes_memories"
+        assert display["last_recall_count"] == 7
+        assert display["api_key"] in ("(set)", "(unset)")
+        assert "api_key" not in [k for k in display if isinstance(display[k], str) and "sk-" in str(display[k])]
+
+    def test_get_status_config_never_prints_the_key(self, qdrant_provider):
+        display = qdrant_provider.get_status_config({"api_key": "sk-secret-123"})
+        assert display["api_key"] == "(set)"
+        assert all("sk-secret-123" not in str(v) for v in display.values())
+
+
+class TestConfigKeyHygiene:
+    """Unknown memory.qdrant keys warn and are dropped (mnemosyne #482 class)."""
+
+    def test_unknown_key_warns_and_is_dropped(self, tmp_path, monkeypatch, caplog):
+        import hermes_cli.config as _cfg
+        monkeypatch.setattr(
+            _cfg, "load_config_readonly",
+            lambda: {"memory": {"qdrant": {"url": "http://x:6333", "bogus_key": 1}}},
+        )
+        import plugins.memory.qdrant as _mod
+        monkeypatch.setattr(
+            _mod, "_config_json_path", lambda: tmp_path / "config.json",
+        )
+        with caplog.at_level("WARNING"):
+            merged = _mod._load_plugin_config()
+        assert "bogus_key" not in merged, "an unknown key must not survive into the config"
+        assert merged["url"] == "http://x:6333", "known keys must still pass through"
+        assert any("unknown config key" in r.message for r in caplog.records), (
+            "dropping silently would reproduce exactly the peer's #482 failure"
+        )

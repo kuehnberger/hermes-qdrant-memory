@@ -30,6 +30,12 @@ body:
       placeholder: "hermes plugins install qdrant"
     validations:
       required: true
+  - type: input
+    id: hermes
+    attributes:
+      label: Hermes version
+      description: "Output of 'hermes --version' (e.g. v0.21.5+4636.g99721dc)."
+      placeholder: "v0.21.5"
   - type: dropdown
     id: result
     attributes:
@@ -53,6 +59,19 @@ body:
     attributes:
       label: Notes / error output
       description: Any errors, tracebacks, or observations. Quote exact messages.
+  - type: textarea
+    id: roundtrip
+    attributes:
+      label: Recall round-trip
+      description: >
+        Ask the agent to store a unique phrase (e.g. "qdrant-test-<date>"),
+        then recall it. Paste what came back. An empty result here is the most
+        valuable report you can give us.
+  - type: textarea
+    id: config
+    attributes:
+      label: "memory.qdrant config (redact api_key)"
+      description: Paste your memory.qdrant block from config.yaml with api_key redacted.
   - type: input
     id: qdrant
     attributes:

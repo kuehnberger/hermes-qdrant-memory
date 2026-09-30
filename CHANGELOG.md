@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-09-30
+
 ### Fixed
 
 - **Model cache is pinned to one durable directory.** The ~90 MB fastembed
@@ -37,6 +39,41 @@ All notable changes to this project are documented here. The format is based on
   do with the code under test. The shared provider fixture now stubs
   `_load_plugin_config()`, and `TestQdrantConfigLoading` covers the inverse
   contract: a `progress` mode written to `config.json` must reach the provider.
+- `qdrant_recall` no longer prints a fabricated `[0.00]` score for every row:
+  a scroll has no query, so a score bracket is shown only when the payload
+  actually carries one.
+- README said `~230 MB RSS` while `plugin.yaml` says `~287 MB peak RSS` for
+  the same measurement — unified to `~287 MB peak RSS`.
+
+### Added
+
+- **`get_status_config()`** — `hermes memory status` now prints our config
+  block (url, collection, embedder, model, vector_size, distance, progress,
+  api_key set/unset) plus **last store/recall timestamps and counts** read
+  from a new `status.json`, so a fresh process can answer "is this working,
+  and when did it last store/recall?" without a live connection. This is the
+  answer to the silent-failure class a peer project's issue history shows
+  (weeks of no writes while every health surface said healthy).
+- **Prefetch dedup** — near-duplicate hits are dropped before injection using
+  word-level Jaccard (>=0.72) / containment (>=0.86) thresholds, adopted from
+  Mnemosyne's `_semantic_dedup_prefetch` after comparing implementations.
+  A prefetch no longer injects three near-copies of one turn.
+- **Unknown config keys warn instead of being silently ignored** (mnemosyne
+  issue #482 class): a typo'd `memory.qdrant` key now logs a warning naming
+  the unknown key and the known set, then is dropped.
+- **Declaration-parity tests** — manifest `provides_tools` <-> `tool_schemas`
+  <-> `handle_tool_call` dispatch branches are asserted mechanically in both
+  directions (catalog rule 6; the peer project's own parity test documents
+  six drifted tool counts as the failure this prevents).
+- Tester-report issue template now also captures the Hermes version, a
+  recall round-trip (store→recall paste; an empty result is the most
+  valuable report), and the redacted `memory.qdrant` config block.
+
+### Documentation
+
+- New "Back up, restore, move" README section: snapshots (vectors included),
+  the docker volume, and the honest note that `hermes backup` carries config
+  only for this provider.
 
 ## [0.1.1] — 2026-09-29
 

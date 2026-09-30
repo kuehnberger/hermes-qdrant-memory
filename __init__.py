@@ -21,6 +21,7 @@ INT8 scalar quantization.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -159,6 +160,19 @@ def _load_plugin_config() -> dict:
     except Exception as e:
         logger.debug("Qdrant env override unavailable (no secret scope): %s", e)
 
+    # Unknown keys are dropped WITH a warning, not silently: a typo'd key that
+    # reads as configured-but-inert is the failure class that took a peer
+    # project 50 silently-ignored config keys (mnemosyne issue #482). The
+    # warning makes the mistake visible; the drop keeps behaviour honest to it.
+    known = {"collection", "vector_size", "distance", "url", "api_key",
+             "embedder", "model", "device", "progress"}
+    unknown = sorted(set(merged) - known)
+    if unknown:
+        logger.warning(
+            "memory.qdrant: ignoring unknown config key(s): %s (known keys: %s)",
+            ", ".join(unknown), ", ".join(sorted(known)),
+        )
+        merged = {k: v for k, v in merged.items() if k in known}
     return merged
 
 
@@ -368,6 +382,37 @@ class QdrantMemoryProvider(MemoryProvider):
 
     # -- Prefetch / Recall ---------------------------------------------------
 
+    @staticmethod
+    def _dedup_hits(pairs: list[tuple[float, str]]) -> list[tuple[float, str]]:
+        """Drop later hits that substantially repeat an earlier one.
+
+        Word-level Jaccard (>=0.72) and containment (>=0.86) thresholds —
+        the two numbers Mnemosyne's `_semantic_dedup_prefetch` uses, adopted
+        after comparing implementations. A prefetch that injects three
+        near-copies of one turn burns context tokens and makes recall look
+        noisier than it is. n <= 10, so the O(n^2) compare is free.
+        """
+        kept: list[tuple[float, str]] = []
+        kept_words: list[set[str]] = []
+        for score, text in pairs:
+            words = set(text.lower().split())
+            if not words:
+                continue
+            duplicate = False
+            for prev in kept_words:
+                inter = len(words & prev)
+                union = len(words | prev)
+                if union and inter / union >= 0.72:
+                    duplicate = True
+                    break
+                if inter / min(len(words), len(prev)) >= 0.86:
+                    duplicate = True
+                    break
+            if not duplicate:
+                kept.append((score, text))
+                kept_words.append(words)
+        return kept
+
     def prefetch(self, query: str, *, session_id: str = "", **kwargs: Any) -> str:
         """Semantic/hybrid search for memories relevant to *query*."""
         if not self._initialized or not self._client:
@@ -402,16 +447,20 @@ class QdrantMemoryProvider(MemoryProvider):
             )
 
             hits = results.points if hasattr(results, "points") else []
-            lines = []
+            pairs: list[tuple[float, str]] = []
             for pt in hits:
                 payload = pt.payload if hasattr(pt, "payload") else {}
                 score = pt.score if hasattr(pt, "score") else 0.0
                 text = payload.get("text", "")
                 if text:
-                    lines.append(f"- [{score:.2f}] {text}")
+                    pairs.append((score, text))
+            pairs = self._dedup_hits(pairs)
+            lines = [f"- [{score:.2f}] {text}" for score, text in pairs]
 
             count = len(lines)
             self._last_recall_count = count
+            self._note_status(last_recall=datetime.now(timezone.utc).isoformat(),
+                              last_recall_count=count)
             if count > 0:
                 self._emit_progress("memory_sync", f"💾 qdrant — recalled {count} memor{'y' if count == 1 else 'ies'}")
             else:
@@ -488,6 +537,7 @@ class QdrantMemoryProvider(MemoryProvider):
 
         self._emit_progress("memory_sync", "💾 qdrant — storing turn...", verbose=True)
 
+        t0 = time.monotonic()
         try:
             # Combine user + assistant for embedding
             combined = f"user: {user}\nassistant: {assistant}"
@@ -514,6 +564,10 @@ class QdrantMemoryProvider(MemoryProvider):
                 wait=True,
             )
             self._record_success()
+            self._note_status(
+                last_store=datetime.now(timezone.utc).isoformat(),
+                last_store_ms=int((time.monotonic() - t0) * 1000),
+            )
 
             # Get the total point count for the progress message
             try:
@@ -525,6 +579,10 @@ class QdrantMemoryProvider(MemoryProvider):
 
         except Exception as e:
             self._record_failure()
+            self._note_status(
+                last_error=f"sync_turn: {e}"[:300],
+                last_error_at=datetime.now(timezone.utc).isoformat(),
+            )
             logger.warning("Qdrant sync_turn failed: %s", e)
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs: Any) -> str:
@@ -625,8 +683,20 @@ class QdrantMemoryProvider(MemoryProvider):
                 limit=limit,
                 with_payload=True,
             )
-            lines = [f"[{pt.payload.get('score', 0):.2f}] {pt.payload.get('text', '')}"
-                     for pt in results if hasattr(pt, "payload")]
+            # A scroll has no query, so there is no similarity score — printing
+            # a fabricated [0.00] for every row would be a fake number. Show a
+            # score bracket only when the payload actually carries one.
+            lines = []
+            for pt in results:
+                if not hasattr(pt, "payload"):
+                    continue
+                payload = pt.payload or {}
+                text = payload.get("text", "")
+                if not text:
+                    continue
+                score = payload.get("score")
+                lines.append(f"[{score:.2f}] {text}"
+                             if isinstance(score, (int, float)) else text)
             return "\n".join(lines) if lines else "No recalled memories"
         except Exception as e:
             return f"qdrant_recall error: {e}"
@@ -1092,6 +1162,75 @@ class QdrantMemoryProvider(MemoryProvider):
         except Exception:
             # A progress display failure must never break memory operations
             pass
+
+    @staticmethod
+    def _status_json_path() -> Any:
+        """``status.json`` next to this module (same rule as config.json)."""
+        from pathlib import Path as _Path
+        return _Path(__file__).resolve().parent / "status.json"
+
+    def _note_status(self, **fields: Any) -> None:
+        """Merge last-operation bookkeeping into status.json — best effort.
+
+        Small atomic write (tmp + os.replace) so a reader never sees a
+        truncated file, and a failure here is swallowed: observability must
+        never break memory operations. This is the answer to a peer project's
+        silent-failure class (mnemosyne #1033: weeks of no writes while every
+        health surface said healthy) — 'when did this last store/recall?' has
+        to be answerable after the fact, from a fresh process.
+        """
+        import json as _json
+        import os as _os
+        path = self._status_json_path()
+        state: dict = {}
+        try:
+            if path.exists():
+                state = _json.loads(path.read_text())
+                if not isinstance(state, dict):
+                    state = {}
+        except Exception:
+            state = {}
+        state.update(fields)
+        try:
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(_json.dumps(state, indent=1))
+            _os.replace(tmp, path)
+        except Exception as e:
+            logger.debug("status.json write failed (non-fatal): %s", e)
+
+    def get_status_config(self, provider_config: dict) -> dict:
+        """Config block for `hermes memory status` (core calls this hook).
+
+        Config keys the CLI cannot know by itself, plus the last store/recall
+        from status.json so a fresh process can answer "is this thing alive?"
+        without a live connection. api_key is never displayed.
+        """
+        import json as _json
+        cfg = dict(provider_config or {})
+        display = {
+            "url": cfg.get("url", self._url),
+            "collection": cfg.get("collection", self._collection),
+            "embedder": cfg.get("embedder", self._embedder),
+            "model": cfg.get("model", self._model),
+            "vector_size": cfg.get("vector_size", self._vector_size),
+            "distance": cfg.get("distance", self._distance),
+            "progress": cfg.get("progress", self._progress_mode),
+            "api_key": "(set)" if cfg.get("api_key") or self._api_key else "(unset)",
+        }
+        try:
+            if self._status_json_path().exists():
+                state = _json.loads(self._status_json_path().read_text())
+                if isinstance(state, dict):
+                    display.update({
+                        key: state[key]
+                        for key in ("last_store", "last_store_ms",
+                                    "last_recall", "last_recall_count",
+                                    "last_error")
+                        if key in state
+                    })
+        except Exception:
+            pass
+        return display
 
 
 # ---------------------------------------------------------------------------

@@ -189,3 +189,53 @@ class TestDocsHonestyGateRuns:
         assert r.returncode == 0, (
             f"docs honesty gate failed (exit {r.returncode}):\n{r.stdout}\n{r.stderr}"
         )
+
+
+class TestDeclarationParity:
+    """manifest <-> tool schemas <-> dispatch must agree, mechanically.
+
+    The peer project's own parity-test docstring is the lesson: "counts
+    published across three repositories had drifted to six different numbers
+    because nothing checked them". Catalog rule 6 makes a mismatch a security
+    issue, so pin it here rather than trusting prose.
+    """
+
+    @staticmethod
+    def _manifest_tools() -> list[str]:
+        import re
+        text = (REPO / "plugin.yaml").read_text(encoding="utf-8")
+        m = re.search(r"^provides_tools:\n((?:[ \t]+-[ \t]+\S+\n)+)", text, re.M)
+        assert m, "provides_tools block not found in plugin.yaml"
+        return [ln.strip()[1:].strip() for ln in m.group(1).strip().splitlines()]
+
+    def test_manifest_matches_tool_schemas(self):
+        from plugins.memory.qdrant.tool_schemas import ALL_TOOL_SCHEMAS
+        declared = set(self._manifest_tools())
+        schema = {s["name"] for s in ALL_TOOL_SCHEMAS}
+        assert declared == schema, (
+            f"plugin.yaml declares {sorted(declared)} but tool_schemas ships "
+            f"{sorted(schema)} — catalog rule 6 treats any mismatch as a "
+            f"security issue"
+        )
+
+    def test_every_schema_name_is_dispatched(self):
+        src = _plugin_source()
+        from plugins.memory.qdrant.tool_schemas import ALL_TOOL_SCHEMAS
+        missing = [s["name"] for s in ALL_TOOL_SCHEMAS
+                   if f'== "{s["name"]}"' not in src]
+        assert not missing, (
+            f"tool schemas without a handle_tool_call branch: {missing} — "
+            f"a declared tool that no branch answers would fail at call time"
+        )
+
+    def test_no_dispatch_branch_without_a_schema(self):
+        import re
+        src = _plugin_source()
+        branch_names = set(re.findall(r'tool_name == "([a-z_0-9]+)"', src))
+        from plugins.memory.qdrant.tool_schemas import ALL_TOOL_SCHEMAS
+        declared = {s["name"] for s in ALL_TOOL_SCHEMAS}
+        extra = branch_names - declared
+        assert not extra, (
+            f"handle_tool_call dispatches {sorted(extra)} but no schema "
+            f"declares them — the tool would be invisible to the agent"
+        )
