@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- README: **Surviving hermes update** — the post-update "configured but not
+  installed / not in catalog" line is a known cosmetic false negative; what
+  update does and does not touch, and the two commands that confirm health.
+- CI: GitHub Actions (lint + pytest 3.11–3.14) with a scratch Qdrant service;
+  actions SHA-pinned, uv from a committed lock. First run caught a hardcoded
+  local path in the docs-honesty gate — now `$HERMES_CORE`, verified against a
+  sparse checkout of hermes core so prose claims stay checked on every push.
+
+### Fixed
+
+- The test suite can no longer write to the production store: live tests need
+  an explicit `QDRANT_URL` on a non-default port (6333 REST **and** 6334 gRPC
+  are refused — the production process owns both), and every collection a test
+  creates is dropped in teardown. This is the leak that had left 4 stray
+  collections next to the 128k-point store.
+- Version drift: `pyproject.toml` / `PLUGIN_VERSION` said `0.1.0` while
+  `plugin.yaml` said `0.1.2` — aligned to `0.1.2`.
+- Two config tests ignored the documented env-beats-file precedence and only
+  passed while `QDRANT_URL` happened to be unset.
+
+
 ## [0.1.2] — 2026-09-30
 
 ### Fixed
