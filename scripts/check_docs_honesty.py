@@ -9,17 +9,25 @@ declares 5 is the same class of defect, and it is the kind a reviewer finds in
 This script checks the claims that are cheap to state and expensive to verify.
 It reads the real source of truth (hermes_cli/subcommands/memory.py for the CLI
 surface, tool_schemas.py for the tools) rather than re-reading our own docs.
+CLI verification needs a hermes core checkout: $HERMES_CORE (CI fetches the
+single file; locally the default path is used, and its absence is a PRINTED
+skip — the tool/manifest checks still run and still fail the build).
 
 Run:  python3 scripts/check_docs_honesty.py
 Exit: 0 clean, 1 on any violation.
 """
 
+import os
 import re
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-CORE = Path("/home/gk/.hermes/hermes-agent")
+
+# HerMES core checkout used to verify claims about the `hermes memory` CLI.
+# HERMES_CORE overrides (CI fetches just that file and points this at it);
+# the legacy default keeps local runs working without setup.
+CORE = Path(os.environ.get("HERMES_CORE") or "/home/gk/.hermes/hermes-agent")
 
 # Files whose prose is rendered to reviewers (the catalog renders README.md at
 # the pinned SHA; the others are read by contributors and agents).
@@ -118,7 +126,13 @@ else:
 # --- 2. hermes memory subcommands -------------------------------------------
 sub = CORE / "hermes_cli/subcommands/memory.py"
 if not sub.is_file():
-    problems.append(f"cannot find {sub} — cannot verify the memory CLI surface")
+    # Core genuinely absent (no hermes checkout): say so and verify the rest.
+    # CI always provides the file, so this branch never runs there — and it is
+    # a *printed* skip, never a silent one.
+    print(
+        f"SKIP — hermes core not found at {sub}; CLI-surface claims were NOT "
+        f"verified (set HERMES_CORE to a hermes-agent checkout)"
+    )
 else:
     src = sub.read_text(encoding="utf-8")
     body = src[src.index("memory_sub = memory_sub.add_subparsers") :] if False else src

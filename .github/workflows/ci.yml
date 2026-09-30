@@ -70,6 +70,24 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install uv (pinned)
         run: python -m pip install uv==0.11.26
+      # The docs-honesty gate verifies our `hermes memory ...` prose claims
+      # against the real CLI source. Sparse + blob:none fetches only that one
+      # directory (raw.githubusercontent was rate-limiting us with 429s).
+      # Tracking main on purpose: if upstream renames a subcommand, our README
+      # is then lying and this job must say so.
+      - name: Sparse-checkout hermes core (docs-honesty gate)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: NousResearch/hermes-agent
+          path: hermes-core
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: hermes_cli/subcommands
+      - name: Point the gate at the core checkout
+        run: |
+          test -f hermes-core/hermes_cli/subcommands/memory.py
+          echo "HERMES_CORE=$GITHUB_WORKSPACE/hermes-core" >> "$GITHUB_ENV"
+
       - name: Install dependencies from the committed lock
         run: uv sync --locked --python ${{ matrix.python-version }}
       - name: Wait for the scratch Qdrant
