@@ -1,0 +1,87 @@
+# CI for the standalone plugin repo.
+#
+# Two jobs, both deterministic:
+#   lint — ruff over the WHOLE tree (pyproject [tool.ruff]; the tree is kept
+#          clean, so there is no changed-files workaround like the peer plugin's)
+#   test — pytest matrix 3.11–3.14 (hermes core requires >=3.11,<3.15) against
+#          a scratch Qdrant SERVICE container, never a bare "no server" run
+#
+# Notes:
+# - Actions are pinned by commit SHA (tag comments are informational).
+# - `uv sync --locked` fails the job if pyproject.toml was edited without
+#   relocking — commit both together.
+# - The conftest guard refuses Qdrant's default ports (6333 REST / 6334 gRPC,
+#   wherever production lives); the service is therefore published on 16333.
+# - torch resolves from PyTorch's CPU index via [tool.uv.sources] in
+#   pyproject.toml (~200 MB instead of ~5.2 GB of CUDA wheels).
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint (whole tree)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - name: Install ruff (pinned, same version as the dev group)
+        run: python -m pip install ruff==0.15.10
+      - name: ruff check (whole tree)
+        run: ruff check .
+
+  test:
+    name: pytest py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    services:
+      qdrant:
+        image: qdrant/qdrant@sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10 # v1.19.1
+        ports:
+          - 16333:6333
+    env:
+      # Scratch server for this job only. The conftest guard hard-refuses
+      # Qdrant's default ports (6333 REST / 6334 gRPC — wherever production
+      # lives), so the service publishes on 16333 and live tests run there;
+      # collections they create are torn down by the live_collections_cleanup
+      # fixture and vanish with the container.
+      QDRANT_URL: http://localhost:16333
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install uv (pinned)
+        run: python -m pip install uv==0.11.26
+      - name: Install dependencies from the committed lock
+        run: uv sync --locked --python ${{ matrix.python-version }}
+      - name: Wait for the scratch Qdrant
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:16333/readyz >/dev/null; then
+              echo "qdrant ready after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "qdrant service never became ready" >&2
+          exit 1
+      - name: pytest
+        run: uv run --no-sync --python ${{ matrix.python-version }} pytest -q

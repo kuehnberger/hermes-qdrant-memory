@@ -214,6 +214,13 @@ Documented here so nobody has to read the source to find out:
 
 ## Troubleshooting
 
+**`hermes update` says qdrant is "configured but not installed" / "not in catalog"** — known cosmetic false negative: the catalog check runs before user plugins register. Do NOT reinstall or switch `memory.provider`. `hermes update` touches the core venv and checkout only; it does NOT touch `~/.hermes/plugins/qdrant/`, `config.json`, or the Qdrant server data. Confirm health with:
+
+```bash
+hermes plugins list    # qdrant shows enabled
+hermes memory status
+```
+
 **`unavailable_reason()` mentions a missing dependency** — install the
 packages above in the same interpreter Hermes runs from. The default backend
 needs only `fastembed`; a `ModuleNotFoundError` for `torch` means you selected

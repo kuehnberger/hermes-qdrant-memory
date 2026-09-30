@@ -10,7 +10,6 @@ from __future__ import annotations
 import ast
 import inspect
 import sys
-import types
 from pathlib import Path
 
 import pytest

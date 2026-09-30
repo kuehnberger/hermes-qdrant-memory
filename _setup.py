@@ -50,7 +50,8 @@ def _probe(url: str, api_key: str) -> str | None:
         from qdrant_client import QdrantClient
     except ImportError:
         return ("qdrant-client is not installed. Install it with:\n"
-                "    pip install 'qdrant-client>=1.14.0' 'sentence-transformers>=2.7.0'")
+                "    pip install 'qdrant-client>=1.14.0'"
+                " 'sentence-transformers>=2.7.0'")
     client = None
     try:
         client = QdrantClient(url=url, api_key=api_key or None, timeout=5)

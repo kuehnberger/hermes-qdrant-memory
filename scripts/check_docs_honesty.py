@@ -58,7 +58,9 @@ else:
             rf"{var}\s*=\s*\{{(.*?)\n\}}", schemas_src, re.S
         )
         if not dm:
-            problems.append(f"could not resolve schema variable {var} in tool_schemas.py")
+            problems.append(
+                f"could not resolve schema variable {var} in tool_schemas.py"
+            )
             continue
         nm = re.search(r'"name"\s*:\s*"([^"]+)"', dm.group(1))
         if not nm:
@@ -69,12 +71,18 @@ else:
     print(f"tools declared in tool_schemas.py ({len(tools)}): {', '.join(tools)}")
 
     if not tools:
-        problems.append("resolved zero tools from tool_schemas.py — parser is broken, not the repo")
+        problems.append(
+            "resolved zero tools from tool_schemas.py — "
+            "parser is broken, not the repo"
+        )
 
     # every tool in the list must appear in the manifest
     for t in tools:
         if f"- {t}" not in manifest:
-            problems.append(f"{t} in tool_schemas.py but not in plugin.yaml provides_tools")
+            problems.append(
+                f"{t} in tool_schemas.py but not in "
+                "plugin.yaml provides_tools"
+            )
 
     # every prose claim of a COUNT must equal len(tools)
     count_pat = re.compile(
@@ -91,11 +99,13 @@ else:
                 claimed = int(tok)
             if claimed is None:
                 problems.append(
-                    f"{rel}: unparseable tool count {mt.group(0)!r} (should be {len(tools)})"
+                    f"{rel}: unparseable tool count {mt.group(0)!r} "
+                    f"(should be {len(tools)})"
                 )
             elif claimed != len(tools):
                 problems.append(
-                    f"{rel}: claims {claimed} agent tools, tool_schemas.py has {len(tools)}"
+                    f"{rel}: claims {claimed} agent tools, "
+                    f"tool_schemas.py has {len(tools)}"
                 )
 
     # every tool named anywhere in prose must be real
@@ -127,9 +137,10 @@ else:
             if cmd not in known:
                 problems.append(f"{rel}: `hermes memory {cmd}` is not a subcommand")
         # the --provider flag does not exist on setup
-        for mt in re.finditer(r"hermes memory setup\s+--provider", text):
+        for _ in re.finditer(r"hermes memory setup\s+--provider", text):
             problems.append(
-                f"{rel}: `hermes memory setup --provider` — provider is POSITIONAL, not a flag"
+                f"{rel}: `hermes memory setup --provider` — "
+                "provider is POSITIONAL, not a flag"
             )
 
 
@@ -155,7 +166,10 @@ for rel in PROSE_FILES:
                     re.I,
                 ):
                     continue
-                problems.append(f"{rel}: claims a `hermes qdrant` CLI that does not exist")
+                problems.append(
+                    f"{rel}: claims a `hermes qdrant` CLI "
+                    "that does not exist"
+                )
 
 
 # --- report -----------------------------------------------------------------

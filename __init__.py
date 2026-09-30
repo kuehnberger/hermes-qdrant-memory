@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from agent.memory_provider import MemoryProvider, RecallStatus
@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "embedder.py"),
     )
     if _spec is None or _spec.loader is None:
-        raise ImportError("cannot locate sibling embedder.py")
+        raise ImportError("cannot locate sibling embedder.py") from None
     _embedder = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_embedder)
 
@@ -90,7 +90,7 @@ def _models():
 # ---------------------------------------------------------------------------
 
 PLUGIN_NAME = "qdrant"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.1.2"
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +130,9 @@ def _load_plugin_config() -> dict:
     merged: dict = {}
 
     try:
-        from hermes_cli.config import load_config_readonly  # managed overlay + ${VAR} expansion
+        from hermes_cli.config import (
+            load_config_readonly,  # managed overlay + ${VAR} expansion
+        )
         raw = (load_config_readonly().get("memory") or {}).get(PLUGIN_NAME)
         if isinstance(raw, dict):
             merged.update(raw)
@@ -144,7 +146,9 @@ def _load_plugin_config() -> dict:
             if isinstance(disk, dict):
                 merged.update(disk)
     except Exception as e:
-        logger.warning("Qdrant config.json unreadable, using config.yaml/env only: %s", e)
+        logger.warning(
+            "Qdrant config.json unreadable, using config.yaml/env only: %s", e
+        )
 
     # Secrets live in the env, not the config file — read them last so a
     # rotated key takes effect without touching config.json. ``get_secret``
@@ -332,16 +336,22 @@ class QdrantMemoryProvider(MemoryProvider):
         except Exception as e:
             # A dead/unreachable server must produce a diagnosable error, not a
             # raw qdrant_client traceback (which is what this used to do).
-            self._backend_error = f"cannot reach Qdrant at {self._url}: {type(e).__name__}: {e}"
+            self._backend_error = (
+                f"cannot reach Qdrant at {self._url}: {type(e).__name__}: {e}"
+            )
             self._initialized = False
             self._client = None
-            logger.error("QdrantMemoryProvider initialize failed: %s", self._backend_error)
+            logger.error(
+                "QdrantMemoryProvider initialize failed: %s", self._backend_error
+            )
             raise RuntimeError(self._backend_error) from e
         # Verified reachable: clear any stale negative so a restart can recover.
         self._backend_error = ""
         if self._collection not in collections:
-            logger.info("Creating collection %s (dims=%d, distance=%s, named vector 'dense')",
-                        self._collection, self._vector_size, self._distance)
+            logger.info(
+                "Creating collection %s (dims=%d, distance=%s, named vector 'dense')",
+                self._collection, self._vector_size, self._distance,
+            )
             self._client.create_collection(
                 collection_name=self._collection,
                 vectors_config={
@@ -459,10 +469,13 @@ class QdrantMemoryProvider(MemoryProvider):
 
             count = len(lines)
             self._last_recall_count = count
-            self._note_status(last_recall=datetime.now(timezone.utc).isoformat(),
+            self._note_status(last_recall=datetime.now(UTC).isoformat(),
                               last_recall_count=count)
             if count > 0:
-                self._emit_progress("memory_sync", f"💾 qdrant — recalled {count} memor{'y' if count == 1 else 'ies'}")
+                self._emit_progress(
+                    "memory_sync",
+                    f"💾 qdrant — recalled {count} memor{'y' if count == 1 else 'ies'}",
+                )
             else:
                 self._emit_progress("memory_sync", "💾 qdrant — no relevant memories")
 
@@ -473,7 +486,9 @@ class QdrantMemoryProvider(MemoryProvider):
             logger.warning("Qdrant prefetch failed: %s", e)
             return ""
 
-    def queue_prefetch(self, query: str, *, session_id: str = "", **kwargs: Any) -> None:
+    def queue_prefetch(
+        self, query: str, *, session_id: str = "", **kwargs: Any
+    ) -> None:
         """Background prefetch on a scope-bound thread.
 
         ``plugins/AGENTS.md`` requires every memory-provider background job to go
@@ -544,7 +559,7 @@ class QdrantMemoryProvider(MemoryProvider):
             dense_vec = self._embed(combined)
 
             point_id = str(uuid.uuid4())
-            timestamp = datetime.now(timezone.utc).isoformat()
+            timestamp = datetime.now(UTC).isoformat()
 
             self._client.upsert(
                 collection_name=self._collection,
@@ -565,7 +580,7 @@ class QdrantMemoryProvider(MemoryProvider):
             )
             self._record_success()
             self._note_status(
-                last_store=datetime.now(timezone.utc).isoformat(),
+                last_store=datetime.now(UTC).isoformat(),
                 last_store_ms=int((time.monotonic() - t0) * 1000),
             )
 
@@ -573,7 +588,9 @@ class QdrantMemoryProvider(MemoryProvider):
             try:
                 info = self._client.get_collection(self._collection)
                 count = info.points_count
-                self._emit_progress("memory_sync", f"💾 qdrant — stored ({count:,} points)")
+                self._emit_progress(
+                    "memory_sync", f"💾 qdrant — stored ({count:,} points)"
+                )
             except Exception:
                 self._emit_progress("memory_sync", "💾 qdrant — stored")
 
@@ -581,7 +598,7 @@ class QdrantMemoryProvider(MemoryProvider):
             self._record_failure()
             self._note_status(
                 last_error=f"sync_turn: {e}"[:300],
-                last_error_at=datetime.now(timezone.utc).isoformat(),
+                last_error_at=datetime.now(UTC).isoformat(),
             )
             logger.warning("Qdrant sync_turn failed: %s", e)
 
@@ -657,7 +674,7 @@ class QdrantMemoryProvider(MemoryProvider):
                     "payload": {
                         "text": text[:2000],
                         "session_id": session_id,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                         "source": "tool_upsert",
                     },
                 }],
@@ -769,7 +786,7 @@ class QdrantMemoryProvider(MemoryProvider):
         cfg_path.write_text(_json.dumps(existing, indent=2))
 
     def backup_paths(self) -> list[str]:
-        """Return paths outside HERMES_HOME for hermes backup/import (none for Qdrant)."""
+        """Paths outside HERMES_HOME for hermes backup/import (none for Qdrant)."""
         return []
 
     # -- Shutdown ------------------------------------------------------------
@@ -1100,7 +1117,8 @@ class QdrantMemoryProvider(MemoryProvider):
         ok, msg = self.ensure_model(download=download)
         lines.append(("OK  " if ok else "FAIL") + f"  model: {msg}")
         lines.append(f"      backend={self._embedder!r} model={self._model!r} "
-                     f"device={self._device!r} cache={model_cache_dir(self._embedder)!r}")
+                     f"device={self._device!r} "
+                     f"cache={model_cache_dir(self._embedder)!r}")
 
         live = self._live_vector_spec()
         if live:
@@ -1138,7 +1156,9 @@ class QdrantMemoryProvider(MemoryProvider):
 
     # -- Progress display ----------------------------------------------------
 
-    def _emit_progress(self, event_type: str, message: str, *, verbose: bool = False) -> None:
+    def _emit_progress(
+        self, event_type: str, message: str, *, verbose: bool = False
+    ) -> None:
         """Emit a progress event via status_callback if enabled.
 
         The progress mode controls what is shown:
@@ -1239,7 +1259,6 @@ class QdrantMemoryProvider(MemoryProvider):
 
 def register(ctx: Any) -> None:
     """Register the QdrantMemoryProvider with Hermes."""
-    from agent.memory_provider import MemoryProvider
     provider = QdrantMemoryProvider()
     ctx.register_memory_provider(provider)
     logger.info("QdrantMemoryProvider registered via ctx.register_memory_provider")

@@ -21,8 +21,10 @@ Two jobs, and only these two:
    recognise. When the host install *is* importable (``HERMES_SOURCE`` on the
    path), nothing is stubbed and the real core is used instead.
 
-The tests that require a live Qdrant server on ``http://localhost:6333`` skip
-themselves when nothing is listening; see ``_qdrant_available`` below.
+Tests that need a live Qdrant server take the ``live_qdrant`` fixture below,
+which skips unless ``QDRANT_URL`` explicitly names a scratch server on a
+NON-default port, and fails loudly for Qdrant's default ports (6333 REST /
+6334 gRPC) — the suite never writes to the production store's ports.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ import sys
 import types
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pytest
 
@@ -100,7 +102,7 @@ def _stub_memory_provider_abc() -> None:
     documented no-op. A provider that fails to override an abstract method must
     still fail to instantiate here, or the conformance test proves nothing.
     """
-    from dataclasses import dataclass, field
+    from dataclasses import dataclass
 
     agent = sys.modules.setdefault("agent", types.ModuleType("agent"))
     agent.__path__ = []
@@ -137,7 +139,7 @@ def _stub_memory_provider_abc() -> None:
         def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
             return None
 
-        def recall_status(self) -> Optional[RecallStatus]:
+        def recall_status(self) -> RecallStatus | None:
             return None
 
         def sync_turn(self, user_content: str, assistant_content: str, *,
@@ -145,9 +147,11 @@ def _stub_memory_provider_abc() -> None:
             return None
 
         @abstractmethod
-        def get_tool_schemas(self) -> List[Dict[str, Any]]: ...
+        def get_tool_schemas(self) -> list[dict[str, Any]]: ...
 
-        def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        def handle_tool_call(
+            self, tool_name: str, args: dict[str, Any], **kwargs
+        ) -> str:
             raise NotImplementedError(
                 f"Provider {self.name} does not handle tool {tool_name}")
 
@@ -157,14 +161,16 @@ def _stub_memory_provider_abc() -> None:
         def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
             return None
 
-        def identity_signature(self) -> Dict[str, Any]:
+        def identity_signature(self) -> dict[str, Any]:
             return {}
 
         def on_session_end(self, messages) -> None:
             return None
 
-        def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "",
-                              reset: bool = False, rewound: bool = False, **kwargs) -> None:
+        def on_session_switch(
+            self, new_session_id: str, *, parent_session_id: str = "",
+            reset: bool = False, rewound: bool = False, **kwargs
+        ) -> None:
             return None
 
         def on_pre_compress(self, messages) -> str:
@@ -174,17 +180,17 @@ def _stub_memory_provider_abc() -> None:
                           **kwargs) -> None:
             return None
 
-        def get_config_schema(self) -> List[Dict[str, Any]]:
+        def get_config_schema(self) -> list[dict[str, Any]]:
             return []
 
-        def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
+        def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
             return None
 
         def on_memory_write(self, action: str, target: str, content: str,
-                            metadata: Optional[Dict[str, Any]] = None) -> None:
+                            metadata: dict[str, Any] | None = None) -> None:
             return None
 
-        def backup_paths(self) -> List[str]:
+        def backup_paths(self) -> list[str]:
             return []
 
     def spawn_context_thread(target, *, name: str, daemon: bool = True,
@@ -240,7 +246,7 @@ def _stub_hermes_cli() -> None:
 
     config_mod = types.ModuleType("hermes_cli.config")
 
-    def load_config_readonly() -> Dict[str, Any]:
+    def load_config_readonly() -> dict[str, Any]:
         return {}
 
     config_mod.load_config_readonly = load_config_readonly
@@ -267,7 +273,7 @@ def _stub_hermes_cli() -> None:
 
     web_mod = types.ModuleType("hermes_cli.web_server_memory")
 
-    def _schema_field_kind(raw: Dict[str, Any], choices: list) -> str:
+    def _schema_field_kind(raw: dict[str, Any], choices: list) -> str:
         explicit = str(raw.get("kind") or raw.get("type") or "").strip().lower()
         default = raw.get("default")
         if raw.get("secret"):
@@ -283,7 +289,9 @@ def _stub_hermes_cli() -> None:
             return "number"
         return "text"
 
-    def _normalize_memory_provider_schema(name: str, provider: Any) -> List[Dict[str, Any]]:
+    def _normalize_memory_provider_schema(
+        name: str, provider: Any
+    ) -> list[dict[str, Any]]:
         raw_schema = []
         if provider is not None and hasattr(provider, "get_config_schema"):
             try:
@@ -365,10 +373,52 @@ _pin_session_model_cache()
 
 # ---------------------------------------------------------------------------
 # 4. Live-server gate
+#
+# The suite MUST NOT write to the production server (localhost:6333, home of
+# the ~128k-point hermes_memories collection). Live tests therefore run only
+# against a scratch server named explicitly via QDRANT_URL, e.g.
+# ``QDRANT_URL=http://localhost:16333 pytest``. With no override set they skip;
+# when the override names production they fail loudly.
 # ---------------------------------------------------------------------------
 
+# Default Qdrant ports = where production lives (6333 REST, 6334 gRPC — on
+# this very host the production process listens on BOTH, so a suite pointed at
+# "just 6334" would still be pointed at the live store's owner). Refuse both,
+# on any host: a scratch server must choose a non-default port, which also
+# makes an accidental production target impossible to write to.
+DEFAULT_QDRANT_PORTS = frozenset({"6333", "6334"})
 
-def _qdrant_reachable(url: str = "http://localhost:6333", timeout: float = 1.5) -> bool:
+
+def _normalize_qdrant_url(url: str) -> str:
+    return (url or "").strip().rstrip("/").lower()
+
+
+def _is_production_url(url: str) -> bool:
+    """True for the default Qdrant ports (REST/gRPC) on any host."""
+    candidate = _normalize_qdrant_url(url)
+    for prefix in ("http://", "https://"):
+        if candidate.startswith(prefix):
+            candidate = candidate[len(prefix):]
+            break
+    else:
+        return False  # not a URL at all — let the connection attempt report it
+    hostport = candidate.split("/", 1)[0]
+    port = hostport.rsplit(":", 1)[1] if ":" in hostport else ""
+    return port in DEFAULT_QDRANT_PORTS
+
+
+def assert_not_production_url(url: str) -> None:
+    """Fail loudly if a test target is the production server."""
+    if _is_production_url(url):
+        raise AssertionError(
+            f"refusing to run collection-creating tests against {url!r}: "
+            f"ports 6333/6334 are Qdrant's default REST/gRPC ports, i.e. where "
+            f"production lives — set QDRANT_URL to a scratch server on a "
+            f"non-default port (e.g. http://localhost:16333)"
+        )
+
+
+def _qdrant_reachable(url: str, timeout: float = 1.5) -> bool:
     import urllib.error
     import urllib.request
     try:
@@ -380,11 +430,55 @@ def _qdrant_reachable(url: str = "http://localhost:6333", timeout: float = 1.5) 
 
 @pytest.fixture(scope="session")
 def live_qdrant() -> str:
-    """Skip the calling test unless a Qdrant server is listening on :6333.
+    """Yield the scratch Qdrant server URL for live tests.
 
-    ``docker run -p 6333:6333 qdrant/qdrant`` is all it takes to un-skip them.
+    Live tests run ONLY when ``QDRANT_URL`` explicitly names a scratch
+    server on a non-default port, e.g.
+    ``QDRANT_URL=http://localhost:16333 pytest``. With no override set they
+    skip; when the override names a default Qdrant port (6333/6334) they
+    fail loudly instead of writing to production.
     """
-    url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    url = os.environ.get("QDRANT_URL", "").strip()
+    if not url:
+        pytest.skip(
+            "QDRANT_URL not set — live tests need an explicit scratch server "
+            "(e.g. QDRANT_URL=http://localhost:16333 pytest)"
+        )
+    assert_not_production_url(url)
     if not _qdrant_reachable(url):
         pytest.skip(f"no Qdrant server at {url} — start one to run the live tests")
     return url
+
+
+@pytest.fixture
+def live_collections_cleanup(live_qdrant):
+    """Delete any collections a test creates, in fixture teardown.
+
+    Snapshots the collection list before the test and deletes whatever is
+    new afterwards, so a passing or failing collection-creating test can
+    never leak ``test_*`` collections onto the server.
+    """
+    assert_not_production_url(live_qdrant)
+    from qdrant_client import QdrantClient
+
+    client = QdrantClient(url=live_qdrant, prefer_grpc=False, timeout=10)
+    try:
+        before = {c.name for c in client.get_collections().collections}
+    except Exception:
+        before = set()
+    yield live_qdrant
+    try:
+        try:
+            after = {c.name for c in client.get_collections().collections}
+        except Exception:
+            return
+        for name in sorted(after - before):
+            try:
+                client.delete_collection(name)
+            except Exception:
+                pass
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass

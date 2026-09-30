@@ -163,10 +163,16 @@ class QdrantBackend:
         if self._client is None:
             return []
 
-        from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+        from qdrant_client.http.models import FieldCondition, Filter, MatchValue
 
         flt = (
-            Filter(must=[FieldCondition(key="session_id", match=MatchValue(value=session_id))])
+            Filter(
+                must=[
+                    FieldCondition(
+                        key="session_id", match=MatchValue(value=session_id)
+                    )
+                ]
+            )
             if session_id
             else None
         )
@@ -199,12 +205,21 @@ class QdrantBackend:
             return []
 
         from qdrant_client.models import (
-            Filter, FieldCondition, MatchValue,
-            Prefetch, FusionQuery,
+            FieldCondition,
+            Filter,
+            FusionQuery,
+            MatchValue,
+            Prefetch,
         )
 
         flt = (
-            Filter(must=[FieldCondition(key="session_id", match=MatchValue(value=session_id))])
+            Filter(
+                must=[
+                    FieldCondition(
+                        key="session_id", match=MatchValue(value=session_id)
+                    )
+                ]
+            )
             if session_id
             else None
         )
@@ -242,10 +257,16 @@ class QdrantBackend:
         if self._client is None:
             return []
 
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
 
         flt = (
-            Filter(must=[FieldCondition(key="session_id", match=MatchValue(value=session_id))])
+            Filter(
+                must=[
+                    FieldCondition(
+                        key="session_id", match=MatchValue(value=session_id)
+                    )
+                ]
+            )
             if session_id
             else None
         )
@@ -275,7 +296,7 @@ class QdrantBackend:
         if self._client is None:
             raise RuntimeError("Not connected")
 
-        from qdrant_client.models import ScalarQuantization, QuantizationConfig
+        from qdrant_client.models import QuantizationConfig, ScalarQuantization
 
         self._client.update_collection(
             collection_name=collection,

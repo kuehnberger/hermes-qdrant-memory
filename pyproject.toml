@@ -1,9 +1,9 @@
 [project]
 name = "hermes-plugin-qdrant"
-version = "0.1.0"
+version = "0.1.2"
 description = "Self-hostable Qdrant vector-memory backend for Hermes Agent"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 license = { text = "MIT" }
 authors = [{ name = "Hermes Agent community" }]
 keywords = ["hermes", "qdrant", "memory", "vector-search", "plugin"]
@@ -34,7 +34,10 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0,<10"]
+# torch is listed here (dev only) so the source pin below binds: uv's
+# [tool.uv.sources] applies to direct dependencies, and sentence-transformers
+# needs torch for the vector-parity tests. Not a runtime declaration.
+dev = ["pytest>=8.0,<10", "ruff==0.15.10", "torch>=2.0"]
 
 # This is a directory plugin, not an importable distribution — Hermes loads it
 # by directory path from $HERMES_HOME/plugins/qdrant/, so there is nothing to
@@ -43,8 +46,42 @@ dev = ["pytest>=8.0,<10"]
 [tool.uv]
 package = false
 
+# torch for dev/CI comes from PyTorch's CPU index. PyPI's default linux torch
+# wheel is the CUDA build (~5.2 GB incl. nvidia-* wheels); this plugin never
+# uses CUDA (runtime default is fastembed/ONNX). `explicit = true` keeps the
+# mirror from ever serving *other* packages (uv's first-index strategy would
+# otherwise stop at PyTorch's stale `requests`), and the sources pin below is
+# what routes torch there. End-user installs are unaffected: hermes reads only
+# [project].dependencies from a plugin pyproject (pm/plugin_declarations.py),
+# never [tool.uv] tables or dependency-groups.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
     "allow_real_home_io: needs a real Qdrant server / real filesystem; see the live_qdrant fixture",
 ]
+
+# Whole-tree lint. The tree stays clean under this config — no changed-files
+# workaround (the peer plugin needed one because ~423 violations had already
+# accumulated tree-wide; this codebase is small enough that never happening
+# is the cheaper option).
+#
+# E,F  pyflakes + pycodestyle errors (line length: default 88)
+# I    isort — import order
+# UP   pyupgrade — modern syntax; py311 = the floor hermes core itself
+#      requires (>=3.11,<3.15), so the plugin never claims older
+# B    bugbear — real footguns: B904 exception chaining, B905 zip strict
+# W    pycodestyle warnings
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]

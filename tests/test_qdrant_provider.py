@@ -1,9 +1,9 @@
 """Tests for the QdrantMemoryProvider plugin (standalone, kind: exclusive).
 
 Covers provider instantiation, config schema, tool schemas, ABC conformance,
-and backend connectivity. The connectivity tests need a real Qdrant on
-``http://localhost:6333`` and skip themselves when nothing is listening — see
-the ``live_qdrant`` fixture in ``conftest.py``.
+and backend connectivity. The connectivity tests need a scratch Qdrant named
+explicitly via QDRANT_URL and skip themselves when none is set — see the
+``live_qdrant`` fixture in ``conftest.py``. They never touch production.
 """
 
 import json
@@ -13,9 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-from plugins.memory.qdrant import EmbeddingError, model_is_present
-from plugins.memory.qdrant import QdrantMemoryProvider
+from plugins.memory.qdrant import EmbeddingError, QdrantMemoryProvider, model_is_present
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -142,7 +140,6 @@ class TestQdrantABCConformance:
     ]
 
     def test_all_abstract_methods_implemented(self, qdrant_provider):
-        from agent.memory_provider import MemoryProvider
         for method in self.REQUIRED_METHODS:
             assert hasattr(qdrant_provider, method), f"Missing ABC method: {method}"
             attr = getattr(qdrant_provider, method)
@@ -152,8 +149,8 @@ class TestQdrantABCConformance:
             assert callable(attr), f"Method {method} not callable"
 
     def test_subclass_of_memory_provider(self):
-        from plugins.memory.qdrant import QdrantMemoryProvider
         from agent.memory_provider import MemoryProvider
+        from plugins.memory.qdrant import QdrantMemoryProvider
         assert issubclass(QdrantMemoryProvider, MemoryProvider)
 
 
@@ -196,7 +193,9 @@ class TestQdrantInitializeKwargContainment:
                 captured.update(ctor_kwargs)
 
             def get_collections(self):
-                return types.SimpleNamespace(collections=[types.SimpleNamespace(name="hermes_memories")])
+                return types.SimpleNamespace(
+                    collections=[types.SimpleNamespace(name="hermes_memories")]
+                )
 
         provider._url = self.URL
         with patch("qdrant_client.QdrantClient", _FakeClient):
@@ -207,7 +206,9 @@ class TestQdrantInitializeKwargContainment:
         captured = self._initialize_capturing_client_kwargs(
             qdrant_provider, **self.SCOPING_KWARGS)
 
-        assert not set(captured) & set(self.SCOPING_KWARGS), "scoping kwargs leaked into QdrantClient"
+        assert not set(captured) & set(self.SCOPING_KWARGS), (
+            "scoping kwargs leaked into QdrantClient"
+        )
         # The connection intent did survive.
         assert captured == {"url": self.URL, "api_key": None,
                             "prefer_grpc": False, "timeout": 30}
@@ -251,7 +252,9 @@ class TestQdrantBackendLiveness:
         assert ok is False
         assert "cannot reach Qdrant" in message
 
-    def test_unavailable_reason_names_missing_dependency(self, qdrant_provider, monkeypatch):
+    def test_unavailable_reason_names_missing_dependency(
+        self, qdrant_provider, monkeypatch
+    ):
         import plugins.memory.qdrant as _qdrant_mod
         monkeypatch.setattr(_qdrant_mod, "_have_qdrant", lambda: False)
         assert "not installed" in qdrant_provider.unavailable_reason()
@@ -359,6 +362,11 @@ class TestQdrantConfigLoading:
 
     def test_config_json_values_reach_the_provider(self, tmp_path, monkeypatch):
         import plugins.memory.qdrant as mod
+        # env beats config.json by design (documented precedence), and CI sets
+        # QDRANT_URL for the scratch server — clear it so the file is the only
+        # input under test.
+        monkeypatch.delenv("QDRANT_URL", raising=False)
+        monkeypatch.delenv("QDRANT_API_KEY", raising=False)
         cfg = self._write_config(tmp_path, {
             "url": "http://qdrant.example.invalid:6333",
             "collection": "custom_memories",
@@ -429,77 +437,127 @@ class TestQdrantConfigLoading:
 
 
 # ---------------------------------------------------------------------------
-# Backend connectivity (live Qdrant on :6333)
+# Backend connectivity (scratch Qdrant via QDRANT_URL; never production)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.allow_real_home_io
 class TestQdrantBackendConnectivity:
 
-    def test_backend_connect_and_ensure_collection(self, live_qdrant):
+    def test_backend_connect_and_ensure_collection(self, live_collections_cleanup):
         """Backend can connect to Qdrant and create a collection."""
         from plugins.memory.qdrant._backend import QdrantBackend
-        b = QdrantBackend(url=live_qdrant)
-        b.connect()
-        assert b._client is not None
-        b.ensure_collection("test_qdrant_abc", vector_size=384, distance="Cosine")
-        cols = b._client.get_collections()
-        names = [c.name for c in cols.collections]
-        assert "test_qdrant_abc" in names
+        b = QdrantBackend(url=live_collections_cleanup)
+        try:
+            b.connect()
+            assert b._client is not None
+            b.ensure_collection("test_qdrant_abc", vector_size=384, distance="Cosine")
+            cols = b._client.get_collections()
+            names = [c.name for c in cols.collections]
+            assert "test_qdrant_abc" in names
+        finally:
+            b.close()
 
-    def test_backend_upsert_and_search(self, live_qdrant):
+    def test_backend_upsert_and_search(self, live_collections_cleanup):
         """Backend can upsert points and search them back."""
         import time
-        from plugins.memory.qdrant._backend import QdrantBackend
-        b = QdrantBackend(url=live_qdrant)
-        b.connect()
-        b.ensure_collection("test_qdrant_search", vector_size=384, distance="Cosine")
-        ts = time.time()
-        b.upsert(
-            points=[
-                {"id": 1, "vector": [0.1] * 384, "payload": {"text": "hello", "session_id": "s1", "ts": ts}},
-                {"id": 2, "vector": [0.2] * 384, "payload": {"text": "world", "session_id": "s1", "ts": ts}},
-            ],
-            collection="test_qdrant_search",
-        )
-        results = b.search(
-            query_vector=[0.1] * 384,
-            collection="test_qdrant_search",
-            session_id="s1",
-            limit=5,
-        )
-        assert len(results) >= 1
-        assert results[0]["score"] == pytest.approx(1.0, abs=0.01)
-        payloads = [r["payload"] for r in results]
-        texts = [p.get("text", "") for p in payloads]
-        assert "hello" in texts or "world" in texts
 
-    def test_backend_scroll(self, live_qdrant):
+        from plugins.memory.qdrant._backend import QdrantBackend
+        b = QdrantBackend(url=live_collections_cleanup)
+        try:
+            b.connect()
+            b.ensure_collection(
+                "test_qdrant_search", vector_size=384, distance="Cosine"
+            )
+            ts = time.time()
+            b.upsert(
+                points=[
+                    {
+                        "id": 1, "vector": [0.1] * 384,
+                        "payload": {"text": "hello", "session_id": "s1", "ts": ts},
+                    },
+                    {
+                        "id": 2, "vector": [0.2] * 384,
+                        "payload": {"text": "world", "session_id": "s1", "ts": ts},
+                    },
+                ],
+                collection="test_qdrant_search",
+            )
+            results = b.search(
+                query_vector=[0.1] * 384,
+                collection="test_qdrant_search",
+                session_id="s1",
+                limit=5,
+            )
+            assert len(results) >= 1
+            assert results[0]["score"] == pytest.approx(1.0, abs=0.01)
+            payloads = [r["payload"] for r in results]
+            texts = [p.get("text", "") for p in payloads]
+            assert "hello" in texts or "world" in texts
+        finally:
+            b.close()
+
+    def test_backend_scroll(self, live_collections_cleanup):
         """Backend scroll returns all points in a collection."""
         import time
+
         from plugins.memory.qdrant._backend import QdrantBackend
-        b = QdrantBackend(url=live_qdrant)
-        b.connect()
-        b.ensure_collection("test_qdrant_scroll", vector_size=384, distance="Cosine")
-        ts = time.time()
-        b.upsert(
-            points=[
-                {"id": 10, "vector": [0.3] * 384, "payload": {"text": "scroll_test", "session_id": "s2", "ts": ts}},
-            ],
-            collection="test_qdrant_scroll",
-        )
-        results = b.scroll(collection="test_qdrant_scroll", session_id="s2", limit=10)
-        assert len(results) >= 1
-        payloads = [r["payload"] for r in results]
-        texts = [p.get("text", "") for p in payloads]
-        assert "scroll_test" in texts
+        b = QdrantBackend(url=live_collections_cleanup)
+        try:
+            b.connect()
+            b.ensure_collection(
+                "test_qdrant_scroll", vector_size=384, distance="Cosine"
+            )
+            ts = time.time()
+            b.upsert(
+                points=[
+                    {
+                        "id": 10, "vector": [0.3] * 384,
+                        "payload": {
+                            "text": "scroll_test", "session_id": "s2", "ts": ts,
+                        },
+                    },
+                ],
+                collection="test_qdrant_scroll",
+            )
+            results = b.scroll(
+                collection="test_qdrant_scroll", session_id="s2", limit=10
+            )
+            assert len(results) >= 1
+            payloads = [r["payload"] for r in results]
+            texts = [p.get("text", "") for p in payloads]
+            assert "scroll_test" in texts
+        finally:
+            b.close()
 
     def test_backend_list_collections(self, live_qdrant):
         """Backend list_collections returns collection names."""
         from plugins.memory.qdrant._backend import QdrantBackend
         b = QdrantBackend(url=live_qdrant)
-        b.connect()
-        cols = b.list_collections()
-        assert isinstance(cols, list)
+        try:
+            b.connect()
+            cols = b.list_collections()
+            assert isinstance(cols, list)
+        finally:
+            b.close()
+
+class TestLiveServerGuard:
+    """The suite must never write test collections to the production server."""
+
+    def test_default_ports_are_rejected(self):
+        """6333 REST *and* 6334 gRPC — production owns both on this host."""
+        from conftest import assert_not_production_url
+        for url in ("http://localhost:6333", "http://127.0.0.1:6333",
+                    "http://localhost:6333/", "http://localhost:6334",
+                    "https://qdrant.internal:6333", "http://10.0.0.5:6334"):
+            with pytest.raises(AssertionError):
+                assert_not_production_url(url)
+
+    def test_scratch_url_is_accepted(self):
+        from conftest import assert_not_production_url
+        assert_not_production_url("http://localhost:16333")  # must not raise
+        assert_not_production_url("http://127.0.0.1:63340")  # lookalike port
+        assert_not_production_url("")  # empty = skip path, not a write target
+
 
 # ---------------------------------------------------------------------------
 # Embedder contract
@@ -532,7 +590,9 @@ class TestEmbedderContract:
     def test_unknown_backend_raises_config_error(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         from plugins.memory.qdrant import (
-            Embedder, EmbeddingConfigError, EmbeddingError,
+            Embedder,
+            EmbeddingConfigError,
+            EmbeddingError,
         )
         with pytest.raises(EmbeddingConfigError):
             Embedder(backend="not-a-real-backend", model="whatever")
@@ -630,7 +690,7 @@ class TestEmbedderParity:
     ]
 
     def _cos(self, a, b):
-        dot = sum(x * y for x, y in zip(a, b))
+        dot = sum(x * y for x, y in zip(a, b, strict=True))
         na = sum(x * x for x in a) ** 0.5
         nb = sum(y * y for y in b) ** 0.5
         return dot / (na * nb) if na and nb else 0.0
@@ -682,7 +742,7 @@ class TestEmbedderParityLive:
     PROBE_TEXTS = ["Hey! How can I help you today?"]
 
     def _cos(self, a, b):
-        dot = sum(x * y for x, y in zip(a, b))
+        dot = sum(x * y for x, y in zip(a, b, strict=True))
         na = sum(x * x for x in a) ** 0.5
         nb = sum(x * x for x in b) ** 0.5
         return dot / (na * nb) if na and nb else 0.0
@@ -754,7 +814,8 @@ class TestModelPresence:
         self._write_model(tmp_path)
         assert model_is_present("sentence-transformers/all-MiniLM-L6-v2")
         assert emb.model_cache_dir() == str(tmp_path)
-        assert [str(p) for p in emb._roots_for(emb.BACKEND_FASTEMBED)] == [str(tmp_path)]
+        roots = [str(p) for p in emb._roots_for(emb.BACKEND_FASTEMBED)]
+        assert roots == [str(tmp_path)]
 
     def test_stale_tmpdir_copy_is_reported_but_not_present(self, tmp_path, monkeypatch):
         """A copy in a prunable TMPDIR is NOT "present" — but must still be named.
@@ -917,7 +978,7 @@ class TestStoredVectorParity:
     ]
 
     def _cos(self, a, b):
-        dot = sum(x * y for x, y in zip(a, b))
+        dot = sum(x * y for x, y in zip(a, b, strict=True))
         na = sum(x * x for x in a) ** 0.5
         nb = sum(x * x for x in b) ** 0.5
         return dot / (na * nb) if na and nb else 0.0
@@ -926,18 +987,17 @@ class TestStoredVectorParity:
         from qdrant_client import QdrantClient
         return QdrantClient(url=url, prefer_grpc=False, timeout=10)
 
-    def test_new_backend_reproduces_stored_vectors(self, live_qdrant):
+    def test_new_backend_reproduces_stored_vectors(self, live_collections_cleanup):
         """fastembed(text) must match the stored torch-era vector for that text."""
         import uuid
 
         import pytest as _pytest
         st = _pytest.importorskip(
             "sentence_transformers", reason="needs torch to write the old-path vector")
+        from plugins.memory.qdrant import DEFAULT_MODEL
         from qdrant_client import models
 
-        from plugins.memory.qdrant import DEFAULT_MODEL
-
-        client = self._client(live_qdrant)
+        client = self._client(live_collections_cleanup)
         try:
             if client.collection_exists(self.COLLECTION):
                 client.delete_collection(self.COLLECTION)
@@ -999,9 +1059,9 @@ class TestStoredVectorParity:
                 pass
             client.close()
 
-    def test_probe_collection_is_cleaned_up(self, live_qdrant):
+    def test_probe_collection_is_cleaned_up(self, live_collections_cleanup):
         """The parity probe must not leave a collection behind."""
-        client = self._client(live_qdrant)
+        client = self._client(live_collections_cleanup)
         try:
             assert not client.collection_exists(self.COLLECTION), (
                 f"{self.COLLECTION} survived a test run — the test is leaking a "
@@ -1162,14 +1222,19 @@ class TestStatusBookkeeping:
         assert state["last_store_ms"] == 42
         assert state["last_recall_count"] == 3, "later notes must merge, not replace"
 
-    def test_note_status_failure_is_silent(self, qdrant_provider, tmp_path, monkeypatch):
+    def test_note_status_failure_is_silent(
+        self, qdrant_provider, tmp_path, monkeypatch
+    ):
         monkeypatch.setattr(
             QdrantMemoryProvider, "_status_json_path",
             staticmethod(lambda: tmp_path / "no-such-dir" / "status.json"),
         )
-        qdrant_provider._note_status(last_store="x")  # parent dir missing — must not raise
+        # parent dir missing — must not raise
+        qdrant_provider._note_status(last_store="x")
 
-    def test_get_status_config_shows_config_and_state(self, qdrant_provider, tmp_path, monkeypatch):
+    def test_get_status_config_shows_config_and_state(
+        self, qdrant_provider, tmp_path, monkeypatch
+    ):
         monkeypatch.setattr(
             QdrantMemoryProvider, "_status_json_path",
             staticmethod(lambda: tmp_path / "status.json"),
@@ -1180,7 +1245,9 @@ class TestStatusBookkeeping:
         assert display["collection"] == "hermes_memories"
         assert display["last_recall_count"] == 7
         assert display["api_key"] in ("(set)", "(unset)")
-        assert "api_key" not in [k for k in display if isinstance(display[k], str) and "sk-" in str(display[k])]
+        assert not any("sk-" in str(v) for v in display.values()), (
+            "get_status_config must never surface a raw key"
+        )
 
     def test_get_status_config_never_prints_the_key(self, qdrant_provider):
         display = qdrant_provider.get_status_config({"api_key": "sk-secret-123"})
@@ -1192,6 +1259,10 @@ class TestConfigKeyHygiene:
     """Unknown memory.qdrant keys warn and are dropped (mnemosyne #482 class)."""
 
     def test_unknown_key_warns_and_is_dropped(self, tmp_path, monkeypatch, caplog):
+        # CI sets QDRANT_URL for the scratch server; env would outrank the
+        # config file under test (documented precedence).
+        monkeypatch.delenv("QDRANT_URL", raising=False)
+        monkeypatch.delenv("QDRANT_API_KEY", raising=False)
         import hermes_cli.config as _cfg
         monkeypatch.setattr(
             _cfg, "load_config_readonly",
@@ -1203,7 +1274,9 @@ class TestConfigKeyHygiene:
         )
         with caplog.at_level("WARNING"):
             merged = _mod._load_plugin_config()
-        assert "bogus_key" not in merged, "an unknown key must not survive into the config"
+        assert "bogus_key" not in merged, (
+            "an unknown key must not survive into the config"
+        )
         assert merged["url"] == "http://x:6333", "known keys must still pass through"
         assert any("unknown config key" in r.message for r in caplog.records), (
             "dropping silently would reproduce exactly the peer's #482 failure"
