@@ -546,6 +546,69 @@ class TestStateStaysOutOfTheMemberDir:
         mode = (home / "qdrant.json").stat().st_mode
         assert stat_module.S_IMODE(mode) == 0o600, oct(stat_module.S_IMODE(mode))
 
+    def test_sweep_removes_legacy_in_dir_state(self, tmp_path, monkeypatch):
+        """Residue from a pre-0.1.5 install is cleaned up, not left to churn."""
+        import plugins.memory.qdrant as mod
+
+        member = tmp_path / "member"
+        member.mkdir()
+        stale = member / "status.json"
+        stale.write_text('{"last_store": "2020-01-01T00:00:00+00:00"}')
+        legacy_cfg = member / "config.json"
+        legacy_cfg.write_text('{"collection": "hermes_memories"}')
+        monkeypatch.setattr(mod, "__file__", str(member / "__init__.py"))
+
+        removed = mod.sweep_legacy_in_dir_state()
+
+        assert sorted(Path(p).name for p in removed) == ["config.json", "status.json"]
+        assert not stale.exists()
+        assert not legacy_cfg.exists()
+
+    def test_sweep_never_touches_a_real_plugin_input(self, tmp_path, monkeypatch):
+        """Literal names only — a glob would eat plugin.yaml and friends."""
+        import plugins.memory.qdrant as mod
+
+        member = tmp_path / "member"
+        member.mkdir()
+        for name in ("__init__.py", "plugin.yaml", "pyproject.toml", "status.json.bak"):
+            (member / name).write_text("x")
+        monkeypatch.setattr(mod, "__file__", str(member / "__init__.py"))
+
+        assert mod.sweep_legacy_in_dir_state() == []
+        assert sorted(p.name for p in member.iterdir()) == [
+            "__init__.py", "plugin.yaml", "pyproject.toml", "status.json.bak",
+        ]
+
+    def test_sweep_is_a_no_op_on_a_clean_install(self, tmp_path, monkeypatch):
+        """Nothing to remove must not raise, and must not report removals."""
+        import plugins.memory.qdrant as mod
+
+        member = tmp_path / "member"
+        member.mkdir()
+        monkeypatch.setattr(mod, "__file__", str(member / "__init__.py"))
+        assert mod.sweep_legacy_in_dir_state() == []
+        assert mod.sweep_legacy_in_dir_state() == []
+
+    def test_sweep_survives_an_unwritable_member_dir(self, tmp_path, monkeypatch):
+        """A read-only pip install must degrade to debug noise, not an error."""
+        import plugins.memory.qdrant as mod
+
+        member = tmp_path / "member"
+        member.mkdir()
+        (member / "status.json").write_text("{}")
+        monkeypatch.setattr(mod, "__file__", str(member / "__init__.py"))
+
+        real_unlink = Path.unlink
+        monkeypatch.setattr(
+            Path, "unlink",
+            lambda self, *a, **k: (_ for _ in ()).throw(PermissionError("read-only")),
+        )
+        try:
+            assert mod.sweep_legacy_in_dir_state() == []
+        finally:
+            monkeypatch.setattr(Path, "unlink", real_unlink)
+        assert (member / "status.json").exists()
+
 
 # ---------------------------------------------------------------------------
 # Backend connectivity (scratch Qdrant via QDRANT_URL; never production)

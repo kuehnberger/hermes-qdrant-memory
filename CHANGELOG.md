@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **Legacy in-dir state is now swept, so an upgrade cannot leave it churning
+  the venv stamp.** 0.1.5 moved `status.json` and `config.json` out of the
+  plugin directory, but an *upgraded* install kept the copies the old version
+  had written beside the module. `pm.workspace.members_stamp()` hashes every
+  file in a member dir regardless of `.gitignore`, so that inert residue still
+  changed the venv dependency stamp and re-synced dependencies on every launch
+  — and a process still running the pre-0.1.5 code could recreate the file
+  after a manual cleanup, which is exactly what happened on this box (removed
+  2026-10-01 20:34, recreated 22:33). `sweep_legacy_in_dir_state()` now unlinks
+  those two literal filenames from `Path(__file__).parent` on every
+  `initialize()` — which every store and recall passes through — making the
+  cleanup self-healing instead of a one-off. Literal names only, never globs, so
+  a real plugin input can never be matched; never raises (a read-only pip
+  install degrades to debug logging), and reports what it removed.
+
 ### Added
 
 - **Retrieval eval harness** — `scripts/retrieval_eval.py` closes the

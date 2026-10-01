@@ -189,6 +189,57 @@ def _config_json_path(hermes_home: str | None = None) -> Any:
     return _state_home(hermes_home) / "qdrant.json"
 
 
+#: State files 0.1.4 and earlier wrote BESIDE the module, i.e. into a directory
+#: that is a hermes build input. Left behind by an upgrade, their mere presence
+#: keeps ``pm.workspace.members_stamp()`` — and therefore the venv dependency
+#: stamp — different from the one recorded at install time, so every launch takes
+#: the sync branch. Nothing reads them any more; the live writer and reader both
+#: resolve through :func:`_state_home`. Names are literal, not globs: a sweep that
+#: matched patterns would risk deleting a real plugin input.
+_LEGACY_IN_DIR_STATE = ("status.json", "config.json")
+
+
+def sweep_legacy_in_dir_state() -> list:
+    """Remove pre-0.1.5 state files left in the plugin member dir. Best effort.
+
+    Called once per :meth:`QdrantMemoryProvider.initialize`, which every store
+    and recall passes through — that is what makes the cleanup self-healing: a
+    long-lived install keeps picking up a residue written by a process that was
+    already running the older code, without the user running anything.
+
+    Returns the paths it removed (empty when there was nothing to do or the
+    directory is not writable, e.g. a read-only pip install). Never raises:
+    failing to tidy residue must not take memory down.
+    """
+    from pathlib import Path as _Path
+
+    try:
+        member_dir = _Path(__file__).resolve().parent
+        removed = []
+        for name in _LEGACY_IN_DIR_STATE:
+            stale = member_dir / name
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                logger.debug("could not remove legacy %s: %s", stale, e)
+                continue
+            removed.append(str(stale))
+        if removed:
+            logger.info(
+                "Removed legacy in-dir state that predates 0.1.5: %s. Their "
+                "contents now live in %s; while they sat in the member dir they "
+                "changed the venv dependency stamp and re-synced dependencies "
+                "on every launch.",
+                ", ".join(removed), _state_home(),
+            )
+        return removed
+    except Exception as e:  # pragma: no cover - defensive by contract
+        logger.debug("legacy in-dir state sweep skipped: %s", e)
+        return []
+
+
 def _load_plugin_config() -> dict:
     """Read saved provider config: env < config.yaml's ``memory.qdrant`` < state file.
 
@@ -379,6 +430,10 @@ class QdrantMemoryProvider(MemoryProvider):
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         """Connect to Qdrant and ensure the collection exists."""
+        # Before anything else: drop state a pre-0.1.5 process wrote beside the
+        # module. It is inert, but pm.workspace.members_stamp() hashes it and the
+        # residue therefore re-syncs the venv on every launch until it is gone.
+        sweep_legacy_in_dir_state()
         # A previous failed probe must not block recovery: re-probe for real
         # rather than trusting the cached negative from an earlier run.
         self._backend_error = ""
