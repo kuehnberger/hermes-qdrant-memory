@@ -277,6 +277,37 @@ and refuses to start if that name ever equals the configured collection, so
 the production store cannot be written by this script. The metrics themselves
 are offline-unit-tested in `tests/test_retrieval_eval.py`.
 
+## How this compares to other memory plugins
+
+The catalog has more than one memory provider, and the honest summary is that
+they make different trade-offs. Two properties are worth comparing directly,
+because they are the ones you feel on a laptop.
+
+**Startup and disk cost.** The default backend here is `fastembed` (ONNX
+Runtime, CPU-only): ~287 MB peak RSS, no `torch` in the install. Providers
+built on `sentence-transformers` pull `torch` transitively and, in a CUDA
+build, ~5.3 GB with it. If you only ever recall a handful of memories, that
+difference dominates every other one.
+
+**Retrieval honesty.** A provider that cannot reach its backend should say
+*which* failure it is — a bad config versus a dead server — rather than
+reporting "ready". We do that, and a circuit breaker turns an outage into "no
+new memories" instead of a crash. If you are choosing between plugins, check
+that a provider has a real `unavailable_reason()` and a real `check_backend()`;
+a plugin whose availability check only looks at files on disk will report
+healthy against a server that is not there.
+
+**What we have less of.** We ship 5 tools and no CLI, no lifecycle hooks and
+no screenshots, and we do not have a hosted option or a summarization pass.
+Some peers are larger and offer more surface. We prefer fewer moving parts,
+and `docs/competitor-analysis-entropicmem.md` records in detail which
+conventions we copied, which features we deliberately did not, and one
+security pattern in a peer plugin we consider actively unsafe and did not
+replicate.
+
+Retrieval quality is measured rather than asserted — see
+[Evaluation](#evaluation) for the harness and its current numbers.
+
 ## Platform support
 
 Linux and macOS on x86_64 and arm64. Windows x86_64 works; **Windows on ARM

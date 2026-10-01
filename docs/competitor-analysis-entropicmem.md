@@ -18,14 +18,14 @@ The headline finding: **we are ahead on the properties that matter most**
 
 | | EntropicMem | Ours |
 |---|---|---|
-| Python lines | 13,604 (plugin) / ~32,500 (repo) | 3,146 |
-| `__init__.py` | 1,693 | 1,000 |
+| Python lines | 13,604 (plugin) / ~32,500 (repo) | 3,064 (plugin, excl. tests) |
+| `__init__.py` | 1,693 | 1,449 |
 | Tools | 7 | 5 |
 | Hooks | 5 | 0 (three no-op stubs) |
-| Tests | 895 | 58 |
+| Tests | 895 | 134 (plus 2,451 lines of test code) |
 | CLI commands | 34 | 0 |
 | Screenshots | 5 | 0 |
-| Eval harness | `evals/` with datasets + baselines | none |
+| Eval harness | `evals/` with datasets + baselines | `scripts/retrieval_eval.py` (36-query paraphrase corpus, recall@k/MRR/nDCG@5) — **added 2026-10-02, `fc18af9`**, closing the gap this table recorded |
 
 A 34-command CLI is a **second user interface** layered on top of the tool
 surface, and it must be documented, tested, and kept in sync. We have no reason
@@ -69,15 +69,28 @@ Their noise generator uses word banks **deliberately disjoint from probe
 keywords**, so "a noise hit" is always a ranking failure and never a
 shared-token coincidence. That is a genuinely careful detail.
 
-This is our **single biggest evidence gap**: for a vector store, recall quality
-*is* the product, and we currently have no measurement of it at all. We cannot
-tell a filter change from a model change that degraded results.
+This was our **single biggest evidence gap**: for a vector store, recall quality
+*is* the product, and we had no measurement of it at all.
 
-Minimal viable version: ~30 lines of stdlib `recall@k` + `nDCG@k` over a JSONL
-of `(seed_text, query, expected_substring)`, seeded **distractor** points in the
-same session, a pytest asserting a floor, run against the live 127,777-point
-collection. Effort M. Not a submission blocker; it is the difference between a
-demo and a maintained provider.
+**STATUS: CLOSED 2026-10-02 (`fc18af9`).** `scripts/retrieval_eval.py` ships
+and runs: a 36-memory corpus with one paraphrased recall query per memory,
+seeded and queried through the real tool path, reporting
+recall@1/5/10 + MRR + nDCG@5 + latency. First run: recall@1 0.944,
+recall@5 1.000, MRR 0.968, nDCG@5 0.976, mean 22.9 ms — reproduced on a second
+run. `--min-recall5` gives the direction-aware floor this section asked for
+(exit 1 below threshold).
+
+Two deliberate departures from their harness, recorded so the gap is not
+reopened by assumption:
+- **No injected-noise experiment.** Their `noise.py` seeds adversarial points
+  to measure `noise_rate`/`must_not_ok`; ours has no injection screen, so those
+  metrics would measure a feature we do not have. Their word banks being
+  disjoint from probe keywords is still the right idea if that is ever built.
+- **No distractor seeding in the first version.** Every corpus item is its own
+  target, so the harness measures *ranking*, not *discrimination under
+  near-miss competition*. Adding same-topic distractors is the obvious next
+  step and would make recall@1 far less flattering — worth doing before any
+  claim about robustness, not after.
 
 ### 3. An AST import-consistency test
 
