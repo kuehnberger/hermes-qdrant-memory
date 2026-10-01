@@ -16,6 +16,8 @@ All notable changes to this project are documented here. The format is based on
   local path in the docs-honesty gate — now `$HERMES_CORE`, verified against a
   sparse checkout of hermes core so prose claims stay checked on every push.
 
+## [0.1.3] — 2026-10-01
+
 ### Changed
 
 - **Runtime state moved out of the plugin directory** — `<HERMES_HOME>/qdrant.json`
