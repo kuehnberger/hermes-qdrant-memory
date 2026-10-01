@@ -37,6 +37,7 @@ provides_tools:
   - qdrant_recall
   - qdrant_collect
   - qdrant_prepare
+  - qdrant_forget
 provides_hooks: []
 
 # No config_fields: — not a manifest key; it is dropped with a warning. The schema

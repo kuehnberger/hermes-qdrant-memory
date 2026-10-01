@@ -135,10 +135,43 @@ QDRANT_PREPARE_SCHEMA = {
 # All schemas (returned by get_tool_schemas)
 # ---------------------------------------------------------------------------
 
+QDRANT_FORGET_SCHEMA = {
+    "name": "qdrant_forget",
+    "description": (
+        "Delete specific memories from Qdrant by point ID. "
+        "Point-targeted only: use IDs from qdrant_search/qdrant_recall. "
+        "There is no bulk or delete-all action — dropping a whole memory "
+        "store is a human decision, made outside the agent."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "point_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Exact point IDs to delete, as returned by qdrant_search "
+                    "or qdrant_recall"
+                ),
+            },
+            "confirm": {
+                "type": "boolean",
+                "description": (
+                    "Must be true. Without it the call only reports which IDs "
+                    "exist and what they contain, and deletes nothing."
+                ),
+                "default": False,
+            },
+        },
+        "required": ["point_ids"],
+    },
+}
+
 ALL_TOOL_SCHEMAS = [
     QDRANT_SEARCH_SCHEMA,
     QDRANT_UPSERT_SCHEMA,
     QDRANT_RECALL_SCHEMA,
     QDRANT_COLLECT_SCHEMA,
     QDRANT_PREPARE_SCHEMA,
+    QDRANT_FORGET_SCHEMA,
 ]

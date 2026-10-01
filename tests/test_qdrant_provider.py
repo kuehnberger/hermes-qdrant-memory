@@ -1636,3 +1636,207 @@ class TestSystemPromptDoesNotLeakCredentials:
 
         assert _url_without_userinfo("") == ""
         assert _url_without_userinfo(None) is None
+
+
+class TestQdrantForget:
+    """qdrant_forget: point-targeted deletion, dry run by default.
+
+    The design constraint is inherited from qdrant_collect, which dropped its
+    'delete' action on purpose: dropping a user's whole memory corpus is a human
+    decision. So there is no delete-all, no delete-by-filter and no
+    delete-by-query here — only exact point IDs, and nothing is removed unless
+    the caller passes confirm: true.
+    """
+
+    UUID_A = "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+    UUID_B = "a1b2c3d4-e5f6-4718-8293-a4b5c6d7e8f9"
+    UUID_MISSING = "00000000-0000-4000-8000-000000000000"
+
+    class _Point:
+        def __init__(self, pid, text):
+            self.id = pid
+            self.payload = {"text": text, "session_id": "s1"}
+
+    def _client(self, points):
+        """Stub client recording every delete call."""
+        deleted = []
+
+        class _Client:
+            def retrieve(self, collection_name, ids, with_payload=True,
+                         with_vectors=False):
+                # Qdrant returns None placeholders for IDs that do not exist.
+                out = []
+                for pid in map(str, ids):
+                    match = next((p for p in points if str(p.id) == pid), None)
+                    out.append(match if match is not None else None)
+                return out
+
+            def delete(self, collection_name, points_selector, wait=False):
+                deleted.append(list(points_selector))
+
+        return _Client(), deleted
+
+    def _provider(self, qdrant_provider, client):
+        qdrant_provider._client = client
+        return qdrant_provider
+
+    def test_dry_run_deletes_nothing(self, qdrant_provider):
+        points = [self._Point(self.UUID_A, "espresso in the morning")]
+        client, deleted = self._client(points)
+        self._provider(qdrant_provider, client)
+
+        out = qdrant_provider.handle_tool_call(
+            "qdrant_forget", {"point_ids": [self.UUID_A]}
+        )
+        assert "DRY RUN" in out
+        assert "Nothing was removed" in out
+        assert self.UUID_A in out, "the dry run must show what it would delete"
+        assert "espresso" in out, "the dry run must show the CONTENT, not just the ID"
+        assert deleted == [], f"dry run deleted {deleted}"
+
+    def test_confirm_true_deletes_exactly_those_ids(self, qdrant_provider):
+        points = [
+            self._Point(self.UUID_A, "one"),
+            self._Point(self.UUID_B, "two"),
+        ]
+        client, deleted = self._client(points)
+        self._provider(qdrant_provider, client)
+
+        out = qdrant_provider.handle_tool_call(
+            "qdrant_forget", {"point_ids": [self.UUID_A], "confirm": True}
+        )
+        assert "deleted 1 point" in out
+        assert deleted == [[self.UUID_A]], f"unexpected delete: {deleted}"
+
+    def test_missing_ids_are_reported_not_fabricated(self, qdrant_provider):
+        points = [self._Point(self.UUID_A, "one")]
+        client, deleted = self._client(points)
+        self._provider(qdrant_provider, client)
+
+        out = qdrant_provider.handle_tool_call(
+            "qdrant_forget",
+            {"point_ids": [self.UUID_A, self.UUID_MISSING], "confirm": True},
+        )
+        assert "deleted 1 point" in out
+        assert "not found" in out and self.UUID_MISSING in out
+        assert deleted == [[self.UUID_A]], "a missing ID must not reach delete()"
+
+    def test_confirm_with_nothing_existing_deletes_nothing(self, qdrant_provider):
+        client, deleted = self._client([])
+        self._provider(qdrant_provider, client)
+
+        out = qdrant_provider.handle_tool_call(
+            "qdrant_forget",
+            {"point_ids": [self.UUID_MISSING], "confirm": True},
+        )
+        assert "nothing to delete" in out
+        assert deleted == []
+
+    def test_no_point_ids_is_an_explicit_error(self, qdrant_provider):
+        client, deleted = self._client([])
+        self._provider(qdrant_provider, client)
+
+        out = qdrant_provider.handle_tool_call("qdrant_forget", {})
+        assert "missing 'point_ids'" in out
+        assert deleted == []
+
+    def test_invalid_ids_are_never_passed_to_the_client(self, qdrant_provider):
+        points = [self._Point(self.UUID_A, "one")]
+        client, deleted = self._client(points)
+        self._provider(qdrant_provider, client)
+
+        out = qdrant_provider.handle_tool_call(
+            "qdrant_forget",
+            {"point_ids": ["'; DROP TABLE", "../../etc/passwd", "", "not-a-uuid"],
+             "confirm": True},
+        )
+        assert "no valid point IDs" in out
+        assert deleted == [], f"an invalid ID reached delete(): {deleted}"
+
+    def test_invalid_ids_are_dropped_but_valid_ones_still_work(self, qdrant_provider):
+        points = [self._Point(self.UUID_A, "one")]
+        client, deleted = self._client(points)
+        self._provider(qdrant_provider, client)
+
+        out = qdrant_provider.handle_tool_call(
+            "qdrant_forget",
+            {"point_ids": ["garbage", self.UUID_A], "confirm": True},
+        )
+        assert "deleted 1 point" in out
+        assert "ignored as invalid" in out
+        assert deleted == [[self.UUID_A]]
+
+    def test_integer_point_ids_are_accepted(self):
+        """Qdrant allows unsigned integers as point IDs; validate() must not
+        reject a legitimately numeric ID."""
+        from plugins.memory.qdrant import _is_valid_point_id
+
+        assert _is_valid_point_id("12345")
+        assert _is_valid_point_id("0")
+        assert _is_valid_point_id(self.UUID_A)
+        assert not _is_valid_point_id("-1")
+        assert not _is_valid_point_id("1.5")
+        assert not _is_valid_point_id("abc")
+        assert not _is_valid_point_id("")
+
+    def test_batch_is_capped(self, qdrant_provider):
+        """A huge ID list must be truncated, not honoured — otherwise this is
+        a bulk delete wearing a point-ID hat."""
+        from plugins.memory.qdrant import MAX_FORGET_BATCH
+
+        points = [self._Point(f"{i:08d}-0000-4000-8000-000000000000", "x")
+                  for i in range(MAX_FORGET_BATCH + 50)]
+        client, deleted = self._client(points)
+        self._provider(qdrant_provider, client)
+
+        qdrant_provider.handle_tool_call(
+            "qdrant_forget",
+            {"point_ids": [str(p.id) for p in points], "confirm": True},
+        )
+        assert deleted, "expected the capped batch to be deleted"
+        assert len(deleted[0]) == MAX_FORGET_BATCH, (
+            f"batch not capped: {len(deleted[0])}"
+        )
+
+    def test_schema_advertises_no_bulk_action(self):
+        """The schema itself must not offer a destructive shortcut.
+
+        Checked on the parameter NAMES, not the prose: the description
+        deliberately contains the words "no bulk or delete-all action", so a
+        substring scan of the whole schema would flag its own denial.
+        """
+        from plugins.memory.qdrant.tool_schemas import QDRANT_FORGET_SCHEMA
+
+        props = set(QDRANT_FORGET_SCHEMA["parameters"]["properties"])
+        assert props == {"point_ids", "confirm"}, (
+            f"unexpected parameters: {props}"
+        )
+        # Any enum/const that could express a bulk scope would show up here.
+        serialized = repr(QDRANT_FORGET_SCHEMA["parameters"]).lower()
+        for forbidden in ("delete_all", "drop_collection", "delete_collection",
+                          "filter", "where", "match"):
+            assert forbidden not in serialized, f"schema mentions {forbidden!r}"
+        assert QDRANT_FORGET_SCHEMA["parameters"]["required"] == ["point_ids"]
+
+    def test_search_output_carries_point_ids(self, qdrant_provider):
+        """forget is unusable unless search/recall print the IDs it needs."""
+        from plugins.memory.qdrant import MAX_LIMIT_SEARCH  # noqa: F401
+
+        class _P:
+            def __init__(self, pid):
+                self.id = pid
+                self.score = 0.91
+                self.payload = {"text": "espresso in the morning"}
+
+        class _Res:
+            points = [_P(TestQdrantForget.UUID_A)]
+
+        class _Client:
+            def query_points(self, **kwargs):
+                return _Res()
+
+        qdrant_provider._client = _Client()
+        out = qdrant_provider.handle_tool_call(
+            "qdrant_search", {"query": "coffee"}
+        )
+        assert self.UUID_A in out, f"search output has no point ID: {out!r}"

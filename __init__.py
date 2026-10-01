@@ -21,6 +21,7 @@ INT8 scalar quantization.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from datetime import UTC, datetime
@@ -71,6 +72,23 @@ logger = logging.getLogger("hermes.plugins.memory.qdrant")
 # more than search, but neither wants "everything".
 MAX_LIMIT_SEARCH = 100
 MAX_LIMIT_RECALL = 1000
+
+#: Ceiling on one ``qdrant_forget`` call. The tool is deliberately
+#: point-targeted, so a batch cap is what keeps it from being a bulk delete
+#: with extra steps. Well above any realistic "forget these five memories".
+MAX_FORGET_BATCH = 100
+
+#: Qdrant accepts an unsigned integer or a UUID as a point ID and nothing
+#: else. Validating before the call turns a model-invented ID into a clear
+#: message instead of a client error — or, worse, a wrong match.
+_POINT_ID_RE = re.compile(
+    r"\A(?:[0-9]{1,20}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\Z"
+)
+
+
+def _is_valid_point_id(value: str) -> bool:
+    return bool(_POINT_ID_RE.match(value))
 
 
 def _clamp_limit(raw: object, default: int, ceiling: int) -> int:
@@ -757,6 +775,8 @@ class QdrantMemoryProvider(MemoryProvider):
             return self._tool_collect(args)
         if tool_name == "qdrant_prepare":
             return self._tool_prepare(args)
+        if tool_name == "qdrant_forget":
+            return self._tool_forget(args)
         return f"Unknown qdrant tool: {tool_name}"
 
     # -- Tool implementations ------------------------------------------------
@@ -788,8 +808,15 @@ class QdrantMemoryProvider(MemoryProvider):
                 limit=limit,
             )
             hits = results.points if hasattr(results, "points") else []
-            lines = [f"[{pt.score:.2f}] {pt.payload.get('text', '')}"
-                     for pt in hits if hasattr(pt, "payload")]
+            # The point ID is printed so a specific memory can later be
+            # targeted by qdrant_forget. Without it, forgetting is impossible
+            # for the agent — and "delete the whole collection" is not an
+            # acceptable substitute.
+            lines = [
+                f"[{pt.score:.2f}] ({pt.id}) {pt.payload.get('text', '')}"
+                for pt in hits
+                if hasattr(pt, "payload")
+            ]
             return "\n".join(lines) if lines else "No results"
         except Exception as e:
             return f"qdrant_search error: {e}"
@@ -854,21 +881,114 @@ class QdrantMemoryProvider(MemoryProvider):
                 text = payload.get("text", "")
                 if not text:
                     continue
+                # Point ID included so qdrant_forget can target this row.
                 score = payload.get("score")
-                lines.append(f"[{score:.2f}] {text}"
-                             if isinstance(score, (int, float)) else text)
+                prefix = f"[{score:.2f}] " if isinstance(score, (int, float)) else ""
+                lines.append(f"{prefix}({pt.id}) {text}")
             return "\n".join(lines) if lines else "No recalled memories"
         except Exception as e:
             return f"qdrant_recall error: {e}"
+
+    def _tool_forget(self, args: dict) -> str:
+        """Delete specific memories by point ID. Point-targeted only.
+
+        Two deliberate constraints:
+
+        * **No bulk action.** ``qdrant_collect`` removed its ``delete`` action
+          for the same reason: dropping a user's whole memory corpus is a
+          human decision. There is no delete-all, no delete-by-filter and no
+          delete-by-query here, only exact point IDs.
+        * **Dry run by default.** Without ``confirm: true`` this reports which
+          IDs exist and what they contain, and deletes nothing — so a
+          mis-reasoned call can be inspected before it is irreversible.
+        """
+        raw_ids = args.get("point_ids") or []
+        if isinstance(raw_ids, str):
+            raw_ids = [raw_ids]
+        if not raw_ids:
+            return ("qdrant_forget: missing 'point_ids' — pass exact point IDs "
+                    "from qdrant_search or qdrant_recall")
+        # A model-supplied ID can be anything; Qdrant point IDs are UUIDs or
+        # unsigned integers. Rejecting the rest keeps a stray value from
+        # reaching the client as a type error at best, or the wrong record at
+        # worst. Also caps the batch so this cannot become a bulk delete.
+        ids: list[str] = []
+        invalid: list[str] = []
+        for value in list(raw_ids)[:MAX_FORGET_BATCH]:
+            text = str(value).strip()
+            if not text:
+                continue
+            if _is_valid_point_id(text):
+                ids.append(text)
+            else:
+                invalid.append(text)
+        if not ids:
+            return (f"qdrant_forget: no valid point IDs among {raw_ids!r} — "
+                    f"IDs look like a UUID or an unsigned integer")
+
+        try:
+            existing = self._client.retrieve(
+                collection_name=self._collection,
+                ids=ids,
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as e:
+            return f"qdrant_forget error: {e}"
+
+        found = [p for p in (existing or []) if p is not None]
+        found_ids = {str(p.id) for p in found}
+        missing = [i for i in ids if i not in found_ids]
+
+        def _summary(point) -> str:
+            text = (getattr(point, "payload", None) or {}).get("text", "")
+            text = " ".join(str(text).split())
+            return text[:70] + ("…" if len(text) > 70 else "")
+
+        if not args.get("confirm"):
+            lines = [f"  {p.id}  {_summary(p)}" for p in found]
+            report = [f"qdrant_forget: DRY RUN — {len(found)} point(s) would be "
+                      f"deleted. Nothing was removed."]
+            if lines:
+                report.append("would delete:")
+                report.extend(lines)
+            if missing:
+                report.append(f"not found (ignored): {', '.join(missing)}")
+            if invalid:
+                report.append(f"ignored, not a valid point ID: {', '.join(invalid)}")
+            report.append("Re-run with confirm: true to delete.")
+            return "\n".join(report)
+
+        to_delete = [str(p.id) for p in found]
+        if not to_delete:
+            msg = f"qdrant_forget: nothing to delete — none of {ids} exist"
+            return msg + (f" (not found: {', '.join(missing)})" if missing else "")
+
+        try:
+            self._client.delete(
+                collection_name=self._collection,
+                points_selector=to_delete,
+                wait=True,
+            )
+        except Exception as e:
+            return f"qdrant_forget error: {e}"
+
+        result = f"qdrant_forget: deleted {len(to_delete)} point(s)"
+        if missing:
+            result += f"; {len(missing)} not found: {', '.join(missing)}"
+        if invalid:
+            result += f"; {len(invalid)} ignored as invalid IDs"
+        return result
 
     def _tool_collect(self, args: dict) -> str:
         """Collection inspection: list / info. Read-only by design.
 
         The schema used to advertise a 'delete' action that no branch
         implemented, so the model could call it and get "Unknown action".
-        Deliberately no destructive action: this is a tool the agent can call
-        unprompted, and dropping the user's only memory corpus should be a
-        human decision.
+        Deliberately no destructive action here: this is the inspection tool
+        the agent can call unprompted, and dropping the user's whole memory
+        corpus should be a human decision. Deletion exists only as
+        ``qdrant_forget``, which is point-targeted and dry-run by default.
         """
         action = args.get("action", "list")
         try:

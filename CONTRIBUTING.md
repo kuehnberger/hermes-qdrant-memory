@@ -24,7 +24,7 @@ Thanks for helping. This is a **standalone Hermes plugin repo** — the repo roo
 __init__.py      # QdrantMemoryProvider + register(ctx)
 _backend.py      # qdrant_client wrapper
 _setup.py        # config-schema driven setup helper (not a CLI subcommand)
-tool_schemas.py  # the five tool schemas
+tool_schemas.py  # the six tool schemas
 plugin.yaml      # the manifest (validated by `hermes plugins validate`)
 pyproject.toml   # the sole dependency authority
 tests/           # pytest; conftest.py stubs Hermes core

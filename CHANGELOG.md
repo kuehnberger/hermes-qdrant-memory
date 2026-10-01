@@ -6,40 +6,35 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-### Fixed
-
-- **Legacy in-dir state is now swept, so an upgrade cannot leave it churning
-  the venv stamp.** 0.1.5 moved `status.json` and `config.json` out of the
-  plugin directory, but an *upgraded* install kept the copies the old version
-  had written beside the module. `pm.workspace.members_stamp()` hashes every
-  file in a member dir regardless of `.gitignore`, so that inert residue still
-  changed the venv dependency stamp and re-synced dependencies on every launch
-  — and a process still running the pre-0.1.5 code could recreate the file
-  after a manual cleanup, which is exactly what happened on this box (removed
-  2026-10-01 20:34, recreated 22:33). `sweep_legacy_in_dir_state()` now unlinks
-  those two literal filenames from `Path(__file__).parent` on every
-  `initialize()` — which every store and recall passes through — making the
-  cleanup self-healing instead of a one-off. Literal names only, never globs, so
-  a real plugin input can never be matched; never raises (a read-only pip
-  install degrades to debug logging), and reports what it removed.
-
 ### Added
 
-- **Retrieval eval harness** — `scripts/retrieval_eval.py` closes the
-  "biggest evidence gap" the competitor analysis identified: retrieval
-  quality is now *measured*, not asserted. A 36-memory corpus with one
-  paraphrased recall query per memory, driven through the real tool path
-  (`handle_tool_call` for both seed and search — same embedding, same
-  formatting the model sees), reported as recall@1/5/10, MRR, nDCG@5 and
-  latency. First run on the default fastembed model: recall@1 0.944,
-  recall@5 1.000, MRR 0.968, nDCG@5 0.976, mean latency 22.9 ms — the
-  result reproduced identically on a second run. Writes only to a scratch
-  `hermes_memories_eval` collection (production schema, dropped in
-  `finally`, refuses to start if the name equals the configured
-  collection); `--min-recall5` turns it into a regression gate (exit 1).
-  Metrics are offline-unit-tested (`tests/test_retrieval_eval.py`, 7
-  tests) and the module body imports stdlib-only, keeping the ML stack out
-  of the fast suite.
+- **`qdrant_forget` — point-targeted memory deletion.** The lifecycle gap: the
+  provider could store and recall but never remove, and `qdrant_collect`
+  deliberately has no destructive action. Takes exact point IDs, validates
+  them (Qdrant accepts an unsigned integer or a UUID and nothing else),
+  retrieves what exists, and reports the memory *text* alongside each ID.
+  **Dry run by default** — without `confirm: true` nothing is deleted and the
+  response says what would go. Capped at `MAX_FORGET_BATCH` (100) per call so
+  it cannot become a bulk delete wearing a point-ID hat. No delete-all, no
+  delete-by-filter, no delete-by-query: wiping a memory store stays a human
+  decision.
+- `qdrant_search` and `qdrant_recall` now print the point ID with each hit.
+  Without this the agent has no way to name a memory it wants to forget, and
+  "delete the whole collection" is not an acceptable substitute. Output
+  format changes from `[0.72] text` to `[0.72] (id) text`.
+
+### Changed
+
+- Tool count 5 → 6, propagated to `plugin.yaml` `provides_tools`, README and
+  CONTRIBUTING. The docs-honesty gate caught all four stale claims itself.
+
+### Fixed
+
+- The docs-honesty gate no longer flags a tool-count claim inside a *released*
+  CHANGELOG section. Those entries are a historical record and were true when
+  written; the check is now scoped to the open section above the first
+  released heading, so a future release cannot be pushed into rewriting its own
+  history.
 
 ## [0.1.5] — 2026-10-01
 

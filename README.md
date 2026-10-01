@@ -20,9 +20,11 @@ session.
 - **Honest availability** — `is_available()` / `check_backend()` /
   `unavailable_reason()` distinguish a bad config from a dead server, so
   `hermes memory status` can tell you which one you have.
-- **5 agent tools**: `qdrant_search`, `qdrant_upsert`, `qdrant_recall`,
+- **6 agent tools**: `qdrant_search`, `qdrant_upsert`, `qdrant_recall`,
   `qdrant_collect` (read-only), `qdrant_prepare` (reports the model's
-  dimensions and cache location before you commit to a collection).
+  dimensions and cache location before you commit to a collection), and
+  `qdrant_forget` (deletes specific memories by point ID; point-targeted and
+  dry-run by default — there is no delete-all).
 - **Progress display** — optional status events during memory operations.
   When enabled, the CLI/TUI shows `💾 qdrant — stored (127,778 points)` after
   each turn and `💾 qdrant — recalled 3 memories` after each retrieval.
@@ -136,7 +138,7 @@ optional environment overrides — a local server on the default URL needs
 neither.
 
 > **There is no `hermes qdrant` CLI.** This plugin registers no CLI commands;
-> everything is reached through the five agent tools and `hermes memory status`.
+> everything is reached through the six agent tools and `hermes memory status`.
 
 ## Configuration
 
@@ -219,7 +221,13 @@ Documented here so nobody has to read the source to find out:
   `QdrantClient` directly. Unreachable today.
 - **gRPC** transport is not supported; the client is REST.
 - **No collection pruning.** No TTL, no dedup, no pruning job — a long-lived
-  collection grows unbounded.
+  collection grows unbounded. `qdrant_forget` removes individual memories by
+  point ID but nothing reaps them automatically.
+- **No bulk deletion.** `qdrant_forget` is point-targeted on purpose: there is
+  no delete-all, no delete-by-filter, no delete-by-query. It is a dry run
+  unless called with `confirm: true`, and it shows the memory text it is about
+  to remove so the call can be checked before it is irreversible. Wiping a
+  memory store stays a human decision, taken outside the agent.
 - **No LLM extraction.** Memories are verbatim turns, not summaries.
 
 ## Troubleshooting
@@ -297,7 +305,7 @@ that a provider has a real `unavailable_reason()` and a real `check_backend()`;
 a plugin whose availability check only looks at files on disk will report
 healthy against a server that is not there.
 
-**What we have less of.** We ship 5 tools and no CLI, no lifecycle hooks and
+**What we have less of.** We ship 6 tools and no CLI, no lifecycle hooks and
 no screenshots, and we do not have a hosted option or a summarization pass.
 Some peers are larger and offer more surface. We prefer fewer moving parts,
 and `docs/competitor-analysis-entropicmem.md` records in detail which

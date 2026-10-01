@@ -100,7 +100,23 @@ else:
         "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
     }
     for rel in PROSE_FILES:
-        for mt in count_pat.finditer(read(rel)):
+        text = read(rel)
+        # A tool-count claim describes the CURRENT surface only inside the
+        # changelog's open section. A claim under a released heading (e.g. the
+        # 0.1.x entries saying "Five agent tools") is a historical record and
+        # was true when written — rewriting it would be falsifying the
+        # changelog, and flagging it would force that. Scope the check to the
+        # text above the first released version heading.
+        scope = text
+        if rel == "CHANGELOG.md":
+            released = re.search(r"^## \[\d+\.\d+\.\d+\]", text, re.M)
+            if released:
+                scope = text[: released.start()]
+            else:
+                scope = ""
+        if not scope:
+            continue
+        for mt in count_pat.finditer(scope):
             tok = mt.group(1).lower()
             claimed = words.get(tok)
             if claimed is None and tok.isdigit():
