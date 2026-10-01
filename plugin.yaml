@@ -1,5 +1,5 @@
 name: qdrant                      # MUST equal the catalog key
-version: "0.1.4"                  # quoted — structural validator requires 1-32 chars, and
+version: "0.1.5"                  # quoted — structural validator requires 1-32 chars, and
                                   # the string form avoids the 0.1 -> 0.1 float trap
 manifest_version: 2               # v2 fields: python_dependencies, config_schema
 kind: exclusive                   # one active provider, selected via memory.provider

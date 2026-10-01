@@ -1449,3 +1449,127 @@ class TestMeasuredDimension:
             embedding_size = 0  # plausible-looking, but useless
 
         assert self._embedder(Impl(), "BAAI/bge-base-en-v1.5").dimension() == 768
+
+
+class TestApiKeyNeverPersisted:
+    """Catalog review items 2 and 3: no plaintext key on disk, 0600 from create.
+
+    teknium1's review: save_config persisted whatever it was handed, including
+    api_key, at the default umask, so README's "chmod 0600" was untrue and the
+    dashboard/backup path could carry a live credential.
+    """
+
+    def _provider(self, tmp_path, monkeypatch):
+        import plugins.memory.qdrant as _mod
+        monkeypatch.setattr(
+            _mod, "_config_json_path", lambda *a, **k: tmp_path / "qdrant.json"
+        )
+        return _mod.QdrantMemoryProvider()
+
+    def test_api_key_is_dropped_from_values(self, tmp_path, monkeypatch):
+        import json
+
+        provider = self._provider(tmp_path, monkeypatch)
+        provider.save_config({"url": "http://x:6333", "api_key": "sk-SECRET"}, "")
+        text = (tmp_path / "qdrant.json").read_text()
+        assert "sk-SECRET" not in text, "the key reached disk"
+        assert json.loads(text)["url"] == "http://x:6333", (
+            "non-secret values must survive"
+        )
+
+    def test_legacy_api_key_is_scrubbed_on_next_save(self, tmp_path, monkeypatch):
+        import json
+
+        path = tmp_path / "qdrant.json"
+        path.write_text(json.dumps({"url": "http://x:6333", "api_key": "sk-OLD"}))
+        provider = self._provider(tmp_path, monkeypatch)
+        provider.save_config({"collection": "c"}, "")
+        assert "sk-OLD" not in path.read_text(), (
+            "a key written by an older version survived a save"
+        )
+
+    def test_file_is_created_0600(self, tmp_path, monkeypatch):
+        import stat
+
+        provider = self._provider(tmp_path, monkeypatch)
+        provider.save_config({"url": "http://x:6333"}, "")
+        mode = stat.S_IMODE((tmp_path / "qdrant.json").stat().st_mode)
+        assert mode == 0o600, f"expected 0600 at creation, got {oct(mode)}"
+
+    def test_setup_script_does_not_write_the_key(self, tmp_path, monkeypatch):
+        import inspect
+
+        import plugins.memory.qdrant._setup as setup_mod
+        source = inspect.getsource(setup_mod.run_setup)
+        assert '"api_key": api_key' not in source, (
+            "_setup still hands the key to save_config"
+        )
+
+
+class TestToolArgumentCeilings:
+    """Catalog review note 2: a model-supplied `limit` needs a maximum."""
+
+    def test_search_limit_is_capped_and_floored(self):
+        from plugins.memory.qdrant import MAX_LIMIT_SEARCH, _clamp_limit
+
+        assert _clamp_limit(10**9, 10, MAX_LIMIT_SEARCH) == MAX_LIMIT_SEARCH
+        assert _clamp_limit(0, 10, MAX_LIMIT_SEARCH) == 1
+        assert _clamp_limit(-4, 10, MAX_LIMIT_SEARCH) == 1
+        assert _clamp_limit(5, 10, MAX_LIMIT_SEARCH) == 5
+
+    def test_recall_limit_is_capped_and_floored(self):
+        from plugins.memory.qdrant import MAX_LIMIT_RECALL, _clamp_limit
+
+        assert _clamp_limit(10**9, 100, MAX_LIMIT_RECALL) == MAX_LIMIT_RECALL
+        assert _clamp_limit(-3, 100, MAX_LIMIT_RECALL) == 1
+        assert _clamp_limit(250, 100, MAX_LIMIT_RECALL) == 250
+
+    def test_absent_limit_takes_the_default(self):
+        from plugins.memory.qdrant import _clamp_limit
+
+        assert _clamp_limit(None, 10, 100) == 10
+
+    def test_non_integer_limit_falls_back_instead_of_raising(self):
+        from plugins.memory.qdrant import _clamp_limit
+
+        assert _clamp_limit("not-a-number", 10, 100) == 10
+
+    def test_the_tools_call_the_clamp(self):
+        """The ceilings must be wired in, not merely defined."""
+        import inspect
+
+        import plugins.memory.qdrant as mod
+
+        for name in ("_tool_search", "_tool_recall"):
+            source = inspect.getsource(getattr(mod.QdrantMemoryProvider, name))
+            assert "_clamp_limit(" in source, f"{name} does not clamp its limit"
+
+
+class TestSystemPromptDoesNotLeakCredentials:
+    """Catalog review note 3: userinfo in the URL must not reach the model."""
+
+    def test_userinfo_is_stripped(self):
+        from plugins.memory.qdrant import _url_without_userinfo
+
+        assert _url_without_userinfo("https://user:pw@qdrant.example:6333") == (
+            "https://qdrant.example:6333"
+        )
+
+    def test_plain_url_is_unchanged(self):
+        from plugins.memory.qdrant import _url_without_userinfo
+
+        for url in ("http://localhost:6333", "https://cloud.qdrant.io:6333"):
+            assert _url_without_userinfo(url) == url
+
+    def test_path_and_query_survive_stripping(self):
+        from plugins.memory.qdrant import _url_without_userinfo
+
+        assert _url_without_userinfo("https://u:p@host:6333/path?x=1") == (
+            "https://host:6333/path?x=1"
+        )
+
+    def test_empty_and_none_are_safe(self):
+        from plugins.memory.qdrant import _url_without_userinfo
+
+        assert _url_without_userinfo("") == ""
+        assert _url_without_userinfo(None) is None

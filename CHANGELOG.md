@@ -6,6 +6,50 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-10-01
+
+### Security
+
+- **`api_key` is never written to disk by the plugin.** `save_config()` drops it
+  from `values` before writing, and scrubs a key an older version already put
+  in the file; the standalone `_setup.py` no longer passes it either, and prints
+  the `.env` line to add instead. The key reaches the provider only through
+  `QDRANT_API_KEY` via `get_secret()`. Previously it landed in
+  `<HERMES_HOME>/qdrant.json` in plaintext — a file the dashboard reads and
+  `hermes backup` copies. Found by teknium1 in the catalog review.
+- `qdrant.json` is now created with mode `0600` at `os.open` time rather than
+  chmod-ed afterwards, so the file is never briefly world-readable between
+  creation and chmod (and the mode holds on platforms without POSIX modes,
+  where the old `except OSError: pass` left it at the umask default).
+- `system_prompt_block()` no longer puts URL credentials in front of the model:
+  `https://user:pass@host` is rendered as `https://host`. The system prompt is
+  model-visible and gets echoed into transcripts, logs and bug reports. The
+  connection itself is unchanged — this only shapes the printed string.
+
+### Fixed
+
+- The model-supplied `limit` on `qdrant_search` and `qdrant_recall` is now
+  clamped into `1..100` / `1..1000`. An uncapped `limit=100000` scrolled a whole
+  collection into memory and returned one enormous payload. A non-integer
+  argument now falls back to the default instead of raising a traceback at the
+  model, and `limit=0` returns one result rather than a silent empty set that
+  reads as "nothing was remembered".
+- `_setup.py`'s install hint quoted `qdrant-client>=1.14.0` and
+  `sentence-transformers`, contradicting the actual pyproject floors and the
+  fastembed default. It now quotes the real bounds and the real default backend.
+- `_setup.py` told the user to run `hermes memory provider qdrant`, which is
+  not a subcommand (`memory_sub` has exactly `setup`/`status`/`off`/`reset`).
+  Now `hermes memory setup qdrant`.
+
+### Changed
+
+- The docs-honesty gate now also scans **source** for user-facing claims, not
+  only prose files: a `hermes memory …` subcommand that does not exist, and a
+  dependency floor quoted in code or README that contradicts `pyproject.toml`.
+  Both new checks are mutation-verified — planting the exact defects makes the
+  gate exit 1. The old gate passed `_setup.py` because it only read `.md` files,
+  which is why both of the above survived until review.
+
 ## [0.1.4] — 2026-10-01
 
 ### Fixed

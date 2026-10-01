@@ -64,6 +64,56 @@ pinned_cache_dir = _embedder.pinned_cache_dir
 
 logger = logging.getLogger("hermes.plugins.memory.qdrant")
 
+# Ceiling on a model-supplied `limit`. A tool argument is not a human budget:
+# an accidental `limit=100000` on qdrant_recall scrolls the whole collection
+# into memory and bills the caller one enormous response, and on qdrant_search
+# it is a payload-heavy fetch. Capped per tool — recall legitimately wants
+# more than search, but neither wants "everything".
+MAX_LIMIT_SEARCH = 100
+MAX_LIMIT_RECALL = 1000
+
+
+def _clamp_limit(raw: object, default: int, ceiling: int) -> int:
+    """Coerce a model-supplied ``limit`` into ``1..ceiling``.
+
+    A tool argument is not a human budget: an accidental ``limit=100000`` on
+    qdrant_recall scrolls the whole collection into memory and returns one
+    enormous payload, and on qdrant_search it is a payload-heavy fetch. The
+    floor matters too — ``limit=0`` or a negative value is a silent
+    empty-result, which reads as "nothing was remembered" rather than as a
+    bad argument. A non-integer falls back to the default rather than raising
+    an unhandled traceback at the model.
+    """
+    try:
+        value = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return min(max(value, 1), ceiling)
+
+
+def _url_without_userinfo(url: str) -> str:
+    """The URL with any ``user:pass@`` credential removed, for display only.
+
+    The system prompt is model-visible text and is routinely echoed back in
+    transcripts, logs and bug reports, so a URL carrying basic-auth
+    credentials would leak them to the provider and anywhere the prompt is
+    quoted. The connection itself is unaffected — this only shapes the string
+    we print.
+    """
+    if not url or "@" not in url:
+        return url
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(url)
+        if not parts.netloc or "@" not in parts.netloc:
+            return url
+        host = parts.netloc.rsplit("@", 1)[1]
+        return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+    except Exception:
+        # Never let a display helper break the prompt; over-redact instead.
+        return url.split("@", 1)[1] if "@" in url else url
+
 # ---------------------------------------------------------------------------
 # QdrantClient lazy import — graceful degradation if qdrant-client missing
 # ---------------------------------------------------------------------------
@@ -90,7 +140,7 @@ def _models():
 # ---------------------------------------------------------------------------
 
 PLUGIN_NAME = "qdrant"
-PLUGIN_VERSION = "0.1.4"
+PLUGIN_VERSION = "0.1.5"
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +474,7 @@ class QdrantMemoryProvider(MemoryProvider):
         return (
             f"[Qdrant memory: {status}] "
             f"Collection: {self._collection} | "
-            f"URL: {self._url} | "
+            f"URL: {_url_without_userinfo(self._url)} | "
             f"Vector size: {self._vector_size}"
         )
 
@@ -660,7 +710,7 @@ class QdrantMemoryProvider(MemoryProvider):
         """Semantic/hybrid search with optional filters."""
         query = args.get("query", "")
         session_id = args.get("session_id", "")
-        limit = int(args.get("limit", 10))
+        limit = _clamp_limit(args.get("limit"), 10, MAX_LIMIT_SEARCH)
 
         if not query:
             return "qdrant_search: missing 'query' parameter"
@@ -725,7 +775,7 @@ class QdrantMemoryProvider(MemoryProvider):
     def _tool_recall(self, args: dict) -> str:
         """Scroll/filtered bulk recall for a session."""
         session_id = args.get("session_id", "")
-        limit = int(args.get("limit", 100))
+        limit = _clamp_limit(args.get("limit"), 100, MAX_LIMIT_RECALL)
         if not session_id:
             return "qdrant_recall: missing 'session_id' parameter"
 
@@ -823,16 +873,39 @@ class QdrantMemoryProvider(MemoryProvider):
                 existing = {}
         if not isinstance(existing, dict):
             existing = {}
-        existing.update(values or {})
+
+        # Never persist a credential here. `api_key` arrives in `values` from
+        # a caller that does not know Hermes reads it from the secret scope,
+        # and writing it here would put a plaintext key in a JSON file that
+        # the dashboard reads and `hermes backup` copies. It reaches the
+        # provider through `QDRANT_API_KEY` via `get_secret()` instead, which
+        # is also where a rotated key lands without a re-save.
+        values = dict(values or {})
+        values.pop("api_key", None)
+        existing.update(values)
+
+        # If a previous version (or a hand edit) already wrote a key here,
+        # scrub it on the next save rather than leaving it in place.
+        if existing.pop("api_key", None) is not None:
+            logger.info(
+                "Removed a legacy api_key from %s; the key now comes from "
+                "QDRANT_API_KEY via the secret scope",
+                cfg_path,
+            )
+
         # Atomic (tmp + replace) so a reader never sees a truncated file, and
-        # 0600 because this file may carry a Qdrant API key — the mode the
-        # sibling providers keep theirs at.
+        # 0600 from creation rather than a chmod afterwards: a bare write_text
+        # at the default umask briefly exposes the contents to any local
+        # reader, and on a platform without POSIX modes the chmod was silently
+        # skipped, leaving the README's "0600" claim untrue.
         tmp = cfg_path.with_name(cfg_path.name + ".tmp")
-        tmp.write_text(_json.dumps(existing, indent=2))
-        try:
-            _os.chmod(tmp, 0o600)
-        except OSError:  # platform without POSIX modes
-            pass
+        fd = _os.open(
+            tmp,
+            _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC,
+            0o600,
+        )
+        with _os.fdopen(fd, "w") as handle:
+            handle.write(_json.dumps(existing, indent=2))
         _os.replace(tmp, cfg_path)
 
     def backup_paths(self) -> list[str]:

@@ -1,7 +1,7 @@
 """Standalone setup helper for the Qdrant memory provider.
 
 This is a convenience script, NOT the setup path. The canonical path is
-``hermes memory setup --provider qdrant``, which walks
+``hermes memory setup qdrant``, which walks
 ``QdrantMemoryProvider.get_config_schema()`` and persists through
 ``save_config()`` — this file must not become a second source of truth for the
 same settings.
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -68,8 +69,7 @@ def _probe(url: str, api_key: str) -> str | None:
         from qdrant_client import QdrantClient
     except ImportError:
         return ("qdrant-client is not installed. Install it with:\n"
-                "    pip install 'qdrant-client>=1.14.0'"
-                " 'sentence-transformers>=2.7.0'")
+                "    pip install 'qdrant-client>=1.10.0,<2' 'fastembed>=0.4.0,<1'")
     client = None
     try:
         client = QdrantClient(url=url, api_key=api_key or None, timeout=5)
@@ -92,7 +92,7 @@ def run_setup() -> int:
     print("=" * 60)
     print("Qdrant Memory Provider — standalone setup")
     print("=" * 60)
-    print("(the supported path is `hermes memory setup --provider qdrant`)\n")
+    print("(the supported path is `hermes memory setup qdrant`)\n")
 
     current = _existing()
 
@@ -108,8 +108,7 @@ def run_setup() -> int:
         api_key = current.get("api_key", "")
         print(f"  URL: {url}")
 
-    print("\n[2/4] API key (blank for a local server; "
-          "stored in <HERMES_HOME>/qdrant.json)")
+    print("\n[2/4] API key (blank for a local server)")
     if api_key:
         print(f"  Keeping existing key ...{api_key[-4:]}")
         if input("  Replace it? [y/N]: ").strip().lower() != "y":
@@ -133,16 +132,26 @@ def run_setup() -> int:
     # Same keys, same values, same writer as the canonical wizard. Embedder and
     # vector_size are left at their defaults: _embed() only implements
     # sentence-transformers/all-MiniLM-L6-v2 at 384 dims.
+    # The key is NOT written here: it goes to QDRANT_API_KEY in .env, which is
+    # where Hermes reads it from (the secret scope). save_config() also drops
+    # any api_key it is handed, so even a caller that still passes one cannot
+    # land it in this file.
     from plugins.memory.qdrant import QdrantMemoryProvider
     QdrantMemoryProvider().save_config({
         "url": url,
-        "api_key": api_key,
         "collection": collection,
     }, "")
 
+    if api_key:
+        home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+        env_path = Path(home) / ".env"
+        print(f"\nAPI key NOT saved to { _config_file() } by design.")
+        print("Add this line to " + str(env_path) + " (or export it) instead:")
+        print(f"    QDRANT_API_KEY={api_key}")
+
     print(f"\nConfig written to {_config_file()}")
     print("\nEnable the provider:")
-    print("    hermes memory provider qdrant")
+    print("    hermes memory setup qdrant")
     print("or in config.yaml:    memory:\n      provider: qdrant")
     return 0
 

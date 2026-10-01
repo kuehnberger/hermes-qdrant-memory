@@ -110,8 +110,8 @@ hermes memory setup qdrant
 
 That path activates the provider and installs its dependencies, but it does
 **not** prompt for settings. To configure by hand, create `<HERMES_HOME>/qdrant.json`
-(`0600`, because it can hold an API key) — `~/.hermes/qdrant.json` for the
-default profile, `~/.hermes/profiles/<name>/qdrant.json` for a profile:
+(created `0600`) — `~/.hermes/qdrant.json` for the default profile,
+`~/.hermes/profiles/<name>/qdrant.json` for a profile:
 
 ```json
 {
@@ -121,6 +121,11 @@ default profile, `~/.hermes/profiles/<name>/qdrant.json` for a profile:
   "distance": "Cosine"
 }
 ```
+
+This file holds **no credentials.** `api_key` is deliberately stripped in
+`save_config()` (and any key an older version wrote is scrubbed on the next
+save), so the API key reaches the provider only through `QDRANT_API_KEY` in
+`.env`, read via Hermes' scoped-secret path.
 
 Do **not** put it in the plugin directory. That directory is a build input:
 Hermes hashes every file in it into its dependency stamp, so any state written

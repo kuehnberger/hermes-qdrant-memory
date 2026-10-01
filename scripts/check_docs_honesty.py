@@ -141,15 +141,37 @@ else:
         known = set(re.findall(r'add_parser\(\s*"(setup|status|off|reset)"', src))
     print(f"hermes memory subcommands found: {', '.join(sorted(known))}")
 
-    for rel in PROSE_FILES:
+    # `hermes memory <word>` usages, in prose AND in source. teknium1's review
+    # found `_setup.py` printing `hermes memory provider qdrant` to the user's
+    # terminal — a subcommand that does not exist. The old gate only scanned
+    # PROSE_FILES, so a lie our own code prints passed. User-facing strings live
+    # in .py, so scan those too.
+    #
+    # A CHANGELOG entry quoting the bad string while reporting the fix is not a
+    # false claim, so scan a window before AND after for an explicit denial
+    # ("which is\n  not a subcommand", "used to tell the user", "Now `…`").
+    for rel in [*PROSE_FILES, "_setup.py", "__init__.py"]:
         text = read(rel)
-        # `hermes memory <word>` usages
         for mt in re.finditer(r"hermes memory ([a-z][a-z-]*)", text):
             cmd = mt.group(1)
             if cmd in ("setup", "status", "off", "reset"):
                 continue
-            if cmd not in known:
-                problems.append(f"{rel}: `hermes memory {cmd}` is not a subcommand")
+            if cmd in known:
+                continue
+            start = max(0, mt.start() - 200)
+            seg = text[start : mt.start() + 200].replace("\n", " ")
+            if re.search(
+                r"\bnot a subcommand\b|\bno such\b|\bdoes not exist\b|"
+                r"\bused to\b|\bpreviously\b|\bwas wrong\b|\bfixed\b",
+                seg,
+                re.I,
+            ):
+                continue
+            line_no = text[: mt.start()].count("\n") + 1
+            problems.append(
+                f"{rel}:{line_no}: prints `hermes memory {cmd}`, "
+                f"which is not a subcommand (real: {', '.join(sorted(known))})"
+            )
         # the --provider flag does not exist on setup
         for _ in re.finditer(r"hermes memory setup\s+--provider", text):
             problems.append(
@@ -184,6 +206,31 @@ for rel in PROSE_FILES:
                     f"{rel}: claims a `hermes qdrant` CLI "
                     "that does not exist"
                 )
+
+
+# --- 5. Dependency floors quoted anywhere must match pyproject --------------
+# teknium1's review found the standalone _setup.py still telling users to
+# `pip install qdrant-client>=1.14.0`, which contradicts our own pyproject
+# floor. A stale pin shown to a user at install time is worse than none.
+pyproject_src = read("pyproject.toml")
+floors: dict[str, str] = {}
+for dep in re.findall(r'^\s*"([A-Za-z0-9_.-]+)([^"]*)"', pyproject_src, re.M):
+    floors[dep[0].lower()] = dep[1].strip().strip(",")
+for rel in ("_setup.py", "README.md"):
+    text = read(rel)
+    for mt in re.finditer(r"([a-z0-9_-]+)([><=!~0-9.,]*)", text):
+        pkg = mt.group(1).lower()
+        spec = mt.group(2).strip().rstrip(",")
+        stale = (
+            pkg in floors and spec and spec != floors[pkg]
+            and spec.startswith((">=", "<"))
+        )
+        if stale:
+            line_no = text[: mt.start()].count("\n") + 1
+            problems.append(
+                f"{rel}:{line_no}: quotes {pkg}{spec} but pyproject declares "
+                f"{pkg}{floors[pkg]}"
+            )
 
 
 # --- report -----------------------------------------------------------------
