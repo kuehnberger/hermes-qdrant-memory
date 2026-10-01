@@ -90,7 +90,7 @@ def _models():
 # ---------------------------------------------------------------------------
 
 PLUGIN_NAME = "qdrant"
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 
 
 # ---------------------------------------------------------------------------
@@ -879,6 +879,7 @@ class QdrantMemoryProvider(MemoryProvider):
                 "key": "api_key",
                 "label": "API Key",
                 "type": "secret",
+                "secret": True,
                 "default": "",
                 "env_var": "QDRANT_API_KEY",
                 "description": "Qdrant API key (cloud mode only)",

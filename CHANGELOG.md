@@ -6,15 +6,27 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-### Added
+## [0.1.4] — 2026-10-01
 
-- README: **Surviving hermes update** — the post-update "configured but not
-  installed / not in catalog" line is a known cosmetic false negative; what
-  update does and does not touch, and the two commands that confirm health.
-- CI: GitHub Actions (lint + pytest 3.11–3.14) with a scratch Qdrant service;
-  actions SHA-pinned, uv from a committed lock. First run caught a hardcoded
-  local path in the docs-honesty gate — now `$HERMES_CORE`, verified against a
-  sparse checkout of hermes core so prose claims stay checked on every push.
+### Fixed
+
+- **The `api_key` config field is now actually masked.** It declared
+  `type: "secret"` but not `secret: True`, and Hermes keys on the `secret`
+  flag alone (`hermes_cli/memory_setup.py` `_prompt_schema_fields`,
+  `hermes_cli/web_server_memory.py` `_schema_field_kind`). Without it
+  `hermes memory setup` prompted in plain text and handed the key to
+  `save_config()`, so it landed in `qdrant.json` — or into config.yaml when a
+  `memory.qdrant:` block already existed — and the dashboard's config GET
+  returned it in plaintext. The wizard now masks the field and the key is
+  written only to `QDRANT_API_KEY` in `.env`, which `_load_plugin_config()`
+  already read via `get_secret`, so runtime behaviour is unchanged. Found by
+  teknium1 in the catalog review of NousResearch/hermes-agent#127847; fixed in
+  PR #1 of this repo. `test_api_key_is_flagged_secret` is the regression guard
+  (it fails if the flag is dropped or the dashboard stops classifying the field
+  as `secret`).
+- Not in this release: `_setup.py` (the standalone script) still writes
+  `api_key` into `qdrant.json`. That file is now `0600`, but the script should
+  tell users to export `QDRANT_API_KEY` instead.
 
 ## [0.1.3] — 2026-10-01
 
@@ -51,6 +63,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- The `api_key` config field now sets `secret: True`, which Hermes checks to
+  treat a field as a secret (`type: "secret"` alone is ignored). Without it,
+  `hermes memory setup` prompted for the key in plain text and saved it to
+  `qdrant.json` (or into config.yaml when a `memory.qdrant:` block existed),
+  and the dashboard's config GET returned it. The key now goes only to
+  `QDRANT_API_KEY` in `.env`.
 - `Embedder.dimension()` measured nothing: it read `fastembed`'s `.dim`, which
   **has never existed** — verified by installing 0.4.0, 0.5.0, 0.6.0, 0.7.0,
   0.8.0 and 0.8.1 and inspecting a live `TextEmbedding`. Every call raised

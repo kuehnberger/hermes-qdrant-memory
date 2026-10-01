@@ -342,6 +342,20 @@ class TestQdrantConfigSchemaContract:
         for field in secrets:
             assert field.get("env_var"), f"secret field lacks env_var: {field}"
 
+    def test_api_key_is_flagged_secret(self, qdrant_provider):
+        """Hermes keys on ``secret: True`` (not ``type``) to mask and route to .env.
+
+        Without the flag the setup wizard prompts unmasked and passes the key to
+        ``save_config``, and the dashboard returns it in plaintext.
+        """
+        from hermes_cli.web_server_memory import _normalize_memory_provider_schema
+        field = next(f for f in qdrant_provider.get_config_schema()
+                     if f["key"] == "api_key")
+        assert field.get("secret") is True
+        kinds = {f["key"]: f["kind"]
+                 for f in _normalize_memory_provider_schema("qdrant", qdrant_provider)}
+        assert kinds["api_key"] == "secret"
+
 
 # ---------------------------------------------------------------------------
 # Config loading
