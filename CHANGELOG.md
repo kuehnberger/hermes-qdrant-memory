@@ -51,6 +51,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- The `api_key` config field now sets `secret: True`, which Hermes checks to
+  treat a field as a secret (`type: "secret"` alone is ignored). Without it,
+  `hermes memory setup` prompted for the key in plain text and saved it to
+  `qdrant.json` (or into config.yaml when a `memory.qdrant:` block existed),
+  and the dashboard's config GET returned it. The key now goes only to
+  `QDRANT_API_KEY` in `.env`.
 - `Embedder.dimension()` measured nothing: it read `fastembed`'s `.dim`, which
   **has never existed** — verified by installing 0.4.0, 0.5.0, 0.6.0, 0.7.0,
   0.8.0 and 0.8.1 and inspecting a live `TextEmbedding`. Every call raised

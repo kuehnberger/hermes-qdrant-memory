@@ -879,6 +879,7 @@ class QdrantMemoryProvider(MemoryProvider):
                 "key": "api_key",
                 "label": "API Key",
                 "type": "secret",
+                "secret": True,
                 "default": "",
                 "env_var": "QDRANT_API_KEY",
                 "description": "Qdrant API key (cloud mode only)",
