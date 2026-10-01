@@ -39,9 +39,26 @@ All notable changes to this project are documented here. The format is based on
   hashed by `members_stamp()` — running the suite in the install dir moves the
   stamp. Only a core fix (exclude gitignored state) closes that; this plugin
   cannot.
+- **`fastembed` is now bounded on both ends** (`>=0.4.0,<1`), closing the last
+  bare dependency floor. The lower bound is measured, not assumed: the plugin
+  touches only `TextEmbedding(model_name=…, cache_dir=…)` and `.embed()`, both
+  of which work on 0.4.0 — installed and executed at that exact version, not
+  read off a changelog. The upper bound is the next major. Under PM's unified
+  resolve, an unbounded floor lets a future release refuse the whole install
+  rather than fail one plugin.
 
 ### Fixed
 
+- `Embedder.dimension()` measured nothing: it read `fastembed`'s `.dim`, which
+  **has never existed** — verified by installing 0.4.0, 0.5.0, 0.6.0, 0.7.0,
+  0.8.0 and 0.8.1 and inspecting a live `TextEmbedding`. Every call raised
+  `AttributeError` into a bare `except`, so the method returned the static
+  table while its docstring claimed a measurement. Consequence: a model
+  outside `KNOWN_MODEL_DIMS` reported 0 dims, and `validate_vector_spec()`
+  skipped the vector-size cross-check without saying so. It now reads
+  `embedding_size` (an int on 0.8.x) and only falls back to the table when the
+  attribute is missing or non-positive. `TestMeasuredDimension` (5 tests) pins
+  the measured-wins, table-fallback, zero-is-honest and bogus-value paths.
 - The test suite can no longer write to the production store: live tests need
   an explicit `QDRANT_URL` on a non-default port (6333 REST **and** 6334 gRPC
   are refused — the production process owns both), and every collection a test

@@ -22,7 +22,7 @@ requires_hermes: ">=0.21.4"       # parses under _VERSION_COMPARATOR_RE
 # 1.10.0 is the oldest floor with query_points + Prefetch + FusionQuery.
 python_dependencies:
   - "qdrant-client>=1.10.0,<2"
-  - "fastembed>=0.4.0"
+  - "fastembed>=0.4.0,<1"
   - "sentence-transformers>=2.7.0,<7"
 
 requires_env: []                  # a LOCAL default means no env gate

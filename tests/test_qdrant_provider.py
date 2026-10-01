@@ -1381,3 +1381,57 @@ class TestConfigKeyHygiene:
         assert any("unknown config key" in r.message for r in caplog.records), (
             "dropping silently would reproduce exactly the peer's #482 failure"
         )
+
+
+class TestMeasuredDimension:
+    """dimension() must measure the model, not fall through to the table.
+
+    Regression for a swallowed AttributeError: fastembed has never exposed
+    `.dim` (checked 0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0, 0.8.1), so the old
+    `int(impl.dim)` raised every time and the bare except returned the static
+    table while the docstring claimed a measurement. A model outside
+    KNOWN_MODEL_DIMS therefore reported 0 and validate_vector_spec() skipped
+    the vector_size cross-check silently.
+    """
+
+    def _embedder(self, impl, model):
+        from plugins.memory.qdrant import embedder as emb
+
+        e = emb.Embedder(backend=emb.BACKEND_FASTEMBED, model=model)
+        e._impl = impl
+        return e
+
+    def test_measured_value_wins_over_table(self):
+        class Impl:
+            embedding_size = 999
+
+        # BAAI/bge-base-en-v1.5 is in the table as 768; the model says 999.
+        assert self._embedder(Impl(), "BAAI/bge-base-en-v1.5").dimension() == 999, (
+            "the measured width must win, or the table silently overrides reality"
+        )
+
+    def test_unknown_model_reports_measured_not_zero(self):
+        class Impl:
+            embedding_size = 111
+
+        assert self._embedder(Impl(), "custom/unlisted-model").dimension() == 111, (
+            "an unlisted model must still report its real width, not 0"
+        )
+
+    def test_absent_measurement_falls_back_to_table(self):
+        class Impl:  # no embedding_size at all
+            pass
+
+        assert self._embedder(Impl(), "BAAI/bge-base-en-v1.5").dimension() == 768
+
+    def test_absent_measurement_unknown_model_is_zero_not_a_guess(self):
+        class Impl:
+            pass
+
+        assert self._embedder(Impl(), "custom/unlisted-model").dimension() == 0
+
+    def test_bogus_measurement_is_not_trusted(self):
+        class Impl:
+            embedding_size = 0  # plausible-looking, but useless
+
+        assert self._embedder(Impl(), "BAAI/bge-base-en-v1.5").dimension() == 768

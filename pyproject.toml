@@ -26,7 +26,20 @@ dependencies = [
     # 2,191 MB, and 0.01 s vs 18.24 s to first embed. ST stays a first-class
     # option because it is materially faster on a GPU host. The plugin only
     # calls SentenceTransformer(...).encode(...), stable since 2.x.
-    "fastembed>=0.4.0",
+    # Bounded on both ends, per catalog rule 9 (bare floors get a request for
+    # the oldest API-compatible floor plus an upper bound).
+    #
+    # Lower bound measured, not guessed: the plugin only ever touches
+    # TextEmbedding(model_name=..., cache_dir=...) and .embed(). fastembed
+    # 0.4.0 already accepts both (verified by installing that exact version and
+    # running the same call), so 0.4.0 is the oldest API-compatible floor --
+    # NOT a floor on the newest release.
+    #
+    # Upper bound = next major. 0.x majors break API (0.8 changed the model
+    # registry surface); the plugin is tested against 0.8.1, the version
+    # uv.lock pins. Bounding at <1 stops a future fastembed release from
+    # silently changing the vector space under an existing collection.
+    "fastembed>=0.4.0,<1",
     "sentence-transformers>=2.7.0,<7",
     # torch is NOT declared: it is transitive via sentence-transformers, and
     # ~5.3 GB in a CUDA build is not ours to pin. Runtime installs may drop

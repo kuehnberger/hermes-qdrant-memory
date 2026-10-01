@@ -420,7 +420,17 @@ class Embedder:
 
         try:
             if self.backend == BACKEND_FASTEMBED:
-                return int(impl.dim)  # fastembed exposes .dim
+                # fastembed has never exposed `.dim` (verified by installing
+                # 0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0 and 0.8.1 and inspecting a
+                # live TextEmbedding) -- the attribute simply does not exist, so
+                # the old `int(impl.dim)` was a guaranteed AttributeError that
+                # the bare `except` swallowed. It reported the static table
+                # while claiming to have measured the model. The measured
+                # source is `embedding_size`, an int on 0.8.x; older versions
+                # lacked it too, which is exactly why the table fallback stays.
+                measured = getattr(impl, "embedding_size", None)
+                if isinstance(measured, int) and measured > 0:
+                    return measured
         except Exception:
             pass
         try:

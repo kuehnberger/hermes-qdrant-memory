@@ -46,7 +46,7 @@ session.
   | package | constraint | why |
   |---|---|---|
   | `qdrant-client` | `>=1.10.0,<2` | 1.10.0 is the oldest floor with `query_points` / `Prefetch` / `FusionQuery` |
-  | `fastembed` | `>=0.4.0` | default embedder — ONNX, no torch, ~287 MB peak RSS |
+  | `fastembed` | `>=0.4.0,<1` | default embedder — ONNX, no torch, ~287 MB peak RSS |
   | `sentence-transformers` | `>=2.7.0,<7` | opt-in GPU backend — **heavy**, see below |
 
 `torch` comes in transitively and is intentionally not pinned here.
