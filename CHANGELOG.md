@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Retrieval eval harness** — `scripts/retrieval_eval.py` closes the
+  "biggest evidence gap" the competitor analysis identified: retrieval
+  quality is now *measured*, not asserted. A 36-memory corpus with one
+  paraphrased recall query per memory, driven through the real tool path
+  (`handle_tool_call` for both seed and search — same embedding, same
+  formatting the model sees), reported as recall@1/5/10, MRR, nDCG@5 and
+  latency. First run on the default fastembed model: recall@1 0.944,
+  recall@5 1.000, MRR 0.968, nDCG@5 0.976, mean latency 22.9 ms — the
+  result reproduced identically on a second run. Writes only to a scratch
+  `hermes_memories_eval` collection (production schema, dropped in
+  `finally`, refuses to start if the name equals the configured
+  collection); `--min-recall5` turns it into a regression gate (exit 1).
+  Metrics are offline-unit-tested (`tests/test_retrieval_eval.py`, 7
+  tests) and the module body imports stdlib-only, keeping the ML stack out
+  of the fast suite.
+
 ## [0.1.5] — 2026-10-01
 
 ### Security

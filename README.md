@@ -258,6 +258,25 @@ the provider needs. Point `HERMES_SOURCE` at a checkout of
 [hermes-agent](https://github.com/NousResearch/hermes-agent) to run the same
 tests against the real core instead of the stubs.
 
+### Evaluation
+
+`scripts/retrieval_eval.py` measures retrieval quality instead of asserting
+it: a 36-memory corpus with one paraphrased recall query per memory, run
+through the real tool path (`qdrant_upsert` / `qdrant_search`, same embedding,
+same formatting the model sees), reported as recall@1/5/10, MRR, nDCG@5 and
+latency:
+
+```bash
+python scripts/retrieval_eval.py                      # report only
+python scripts/retrieval_eval.py --min-recall5 0.9    # exit 1 below 0.90
+```
+
+It writes only to a scratch `hermes_memories_eval` collection — created with
+the production schema, dropped when the run ends (`--keep` to inspect it) —
+and refuses to start if that name ever equals the configured collection, so
+the production store cannot be written by this script. The metrics themselves
+are offline-unit-tested in `tests/test_retrieval_eval.py`.
+
 ## Platform support
 
 Linux and macOS on x86_64 and arm64. Windows x86_64 works; **Windows on ARM
