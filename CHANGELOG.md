@@ -16,6 +16,30 @@ All notable changes to this project are documented here. The format is based on
   local path in the docs-honesty gate — now `$HERMES_CORE`, verified against a
   sparse checkout of hermes core so prose claims stay checked on every push.
 
+### Changed
+
+- **Runtime state moved out of the plugin directory** — `<HERMES_HOME>/qdrant.json`
+  (was `config.json`, now written `0600` atomically) and
+  `<HERMES_HOME>/qdrant-status.json` (was `status.json`). `pm.workspace.
+  members_stamp()` hashes every file in a member dir — `_MEMBER_EXCLUDE` covers
+  `.git`/`.venv`/`venv`/`node_modules`/`__pycache__` only — and folds that hash
+  into the venv dependency stamp, so a `status.json` write on every
+  store/recall changed the stamp continuously and the environment re-synced on
+  nearly every launch (48 sync receipts on this box, 3 of them "already in
+  sync"). The core-side stamp logic is the root cause: a gitignored file is not
+  a build input. The plugin no longer gives it anything to hash, and lands
+  where sibling providers keep theirs (`mem0.json`, `honcho.json`,
+  `supermemory.json`). Side benefit: a read-only pip/system install no longer
+  fails on the first `save_config()`. `save_config()` honours the
+  `hermes_home` it is handed; `_state_home()` falls back to the context-local
+  override, then `HERMES_HOME`. Existing installs migrate by moving the two
+  files once; `TestStateStaysOutOfTheMemberDir` guards it (5 tests, red against
+  the pre-move code).
+- Residual, upstream: `.pytest_cache/` inside an installed copy is still
+  hashed by `members_stamp()` — running the suite in the install dir moves the
+  stamp. Only a core fix (exclude gitignored state) closes that; this plugin
+  cannot.
+
 ### Fixed
 
 - The test suite can no longer write to the production store: live tests need

@@ -32,10 +32,10 @@ def _isolate_qdrant_home(tmp_path, monkeypatch):
 def qdrant_provider(monkeypatch):
     """A fresh provider built from DEFAULTS — never from operator state.
 
-    The provider's config is ``config.json`` sitting next to the module plus
-    the ``memory.qdrant:`` overlay in config.yaml, both read by
+    The provider's config is ``<HERMES_HOME>/qdrant.json`` plus the
+    ``memory.qdrant:`` overlay in config.yaml, both read by
     ``_load_plugin_config()``. On a configured install that is somebody else's
-    state, not test input: live config.json read ``{"progress": "verbose"}``
+    state, not test input: the live file read ``{"progress": "verbose"}``
     (written by ``hermes memory setup`` on 2026-09-29), which made
     ``test_progress_mode_defaults_to_minimal`` fail here while passing in the
     repo — a red suite nobody could attribute to the code under test.
@@ -43,11 +43,11 @@ def qdrant_provider(monkeypatch):
     ``config={}`` is NOT a way to opt out. ``__init__`` reads
     ``config or _load_plugin_config()``, and the empty dict is falsy *on
     purpose* — that fall-through is what lets a config.yaml-less install pick
-    up its own ``config.json`` — so ``QdrantMemoryProvider(config={})`` still
-    loads the live file (verified: it returned ``verbose`` on the live install
-    with the config.json shown above). The loader is
-    stubbed instead. Config-loading behaviour itself is covered by
-    ``TestQdrantConfigLoading``, which points the loader at a tmp dir.
+    up its own state file — so ``QdrantMemoryProvider(config={})`` still loads
+    the live file (verified: it returned ``verbose`` on the live install with
+    the state file shown above). The loader is stubbed instead.
+    Config-loading behaviour itself is covered by ``TestQdrantConfigLoading``,
+    which points the loader at a tmp dir.
     """
     import plugins.memory.qdrant as mod
     monkeypatch.setattr(mod, "_load_plugin_config", lambda: {})
@@ -103,15 +103,15 @@ class TestQdrantProviderBasics:
         assert qdrant_provider.backup_paths() == []
 
     def test_save_config_writes_json(self, qdrant_provider, tmp_path, monkeypatch):
-        """save_config writes values to config.json NEXT TO THE MODULE.
+        """save_config writes values to the path _load_plugin_config() reads.
 
-        Not under ``$HERMES_HOME/plugins/memory/qdrant/`` — that path does not
-        exist for a user-dir install (``~/.hermes/plugins/<name>/``), so the
-        write landed somewhere __init__ never read and the value was lost.
+        Under ``$HERMES_HOME`` — not next to the module and not under
+        ``$HERMES_HOME/plugins/memory/qdrant/``. Both of those land somewhere
+        the read path never looks, so the value is silently lost.
         """
         import plugins.memory.qdrant as mod
-        cfg_path = tmp_path / "config.json"
-        monkeypatch.setattr(mod, "_config_json_path", lambda: cfg_path)
+        cfg_path = tmp_path / "qdrant.json"
+        monkeypatch.setattr(mod, "_config_json_path", lambda hermes_home=None: cfg_path)
 
         qdrant_provider.save_config({"url": "http://localhost:6333"}, str(tmp_path))
         assert cfg_path.exists()
@@ -404,11 +404,11 @@ class TestQdrantConfigLoading:
         assert p._collection == "hermes_memories"
         assert p._vector_size == 384
 
-    def test_save_config_writes_next_to_the_module(self, tmp_path, monkeypatch):
+    def test_save_config_round_trips_through_the_read_path(self, tmp_path, monkeypatch):
         """save_config must round-trip through the path __init__ reads."""
         import plugins.memory.qdrant as mod
-        cfg = tmp_path / "config.json"
-        monkeypatch.setattr(mod, "_config_json_path", lambda: cfg)
+        cfg = tmp_path / "qdrant.json"
+        monkeypatch.setattr(mod, "_config_json_path", lambda hermes_home=None: cfg)
 
         from plugins.memory.qdrant import QdrantMemoryProvider
         p = QdrantMemoryProvider()
@@ -423,7 +423,7 @@ class TestQdrantConfigLoading:
         """A ``progress`` mode written by the wizard must override the default.
 
         The inverse of ``test_progress_mode_defaults_to_minimal``: on a live
-        install config.json says ``{"progress": "verbose"}`` and the provider
+        install the state file says ``{"progress": "verbose"}`` and the provider
         must honour it. That is correct production behaviour — the bug was the
         default test reading the file, not the file being read.
         """
@@ -434,6 +434,103 @@ class TestQdrantConfigLoading:
         from plugins.memory.qdrant import QdrantMemoryProvider
         p = QdrantMemoryProvider()
         assert p._progress_mode == "verbose"
+
+
+# ---------------------------------------------------------------------------
+# Member-dir stability — the venv re-sync workaround
+# ---------------------------------------------------------------------------
+
+def _member_dir() -> Path:
+    import plugins.memory.qdrant as mod
+    return Path(mod.__file__).resolve().parent
+
+
+def _member_dir_snapshot() -> dict:
+    """``{relpath: (mtime_ns, size)}`` for the plugin dir, minus caches.
+
+    ``__pycache__`` and ``.pytest_cache`` are excluded on purpose: they are
+    written by importing and collecting, never by the provider. Core's
+    ``members_stamp()`` already skips the first and does *not* skip the second
+    — that is a separate core-side defect for the upstream fix, not something
+    this workaround can close from inside the plugin.
+    """
+    root = _member_dir()
+    snapshot = {}
+    for path in sorted(root.rglob("*")):
+        if "__pycache__" in path.parts or ".pytest_cache" in path.parts:
+            continue
+        try:
+            stat = path.lstat()
+        except OSError:
+            continue
+        snapshot[str(path.relative_to(root))] = (stat.st_mtime_ns, stat.st_size)
+    return snapshot
+
+
+class TestStateStaysOutOfTheMemberDir:
+    """The plugin dir is a build input; runtime state must never touch it.
+
+    Regression guard for the venv re-sync bug. ``pm.workspace.members_stamp()``
+    hashes every file in a member dir and folds that hash into the venv
+    dependency stamp, so a single byte written next to the module made every
+    ``hermes`` launch re-sync dependencies. Core should stop hashing gitignored
+    state; these tests make sure the plugin never gives it the chance.
+    """
+
+    def test_state_paths_live_in_the_home_not_the_member_dir(
+        self, _isolate_qdrant_home
+    ):
+        import plugins.memory.qdrant as mod
+
+        member = _member_dir()
+        paths = {
+            "config": Path(mod._config_json_path()),
+            "status": Path(QdrantMemoryProvider()._status_json_path()),
+        }
+        for label, path in paths.items():
+            assert path.parent == Path(_isolate_qdrant_home), (
+                f"{label} state should sit in the profile home, got {path.parent}"
+            )
+            assert member not in path.parents, (
+                f"{label} state landed inside the member dir: {path}"
+            )
+
+    def test_save_config_never_touches_the_member_dir(self, tmp_path):
+        before = _member_dir_snapshot()
+        home = tmp_path / "home"
+        QdrantMemoryProvider().save_config({"collection": "probe"}, str(home))
+        assert _member_dir_snapshot() == before, "save_config wrote into the member dir"
+        written = home / "qdrant.json"
+        assert json.loads(written.read_text())["collection"] == "probe"
+
+    def test_save_config_honours_the_hermes_home_argument(
+        self, tmp_path, _isolate_qdrant_home
+    ):
+        """The wizard's home wins; the process home is left alone."""
+        explicit = tmp_path / "explicit"
+        QdrantMemoryProvider().save_config({"collection": "from-home"}, str(explicit))
+        assert json.loads((explicit / "qdrant.json").read_text())["collection"] == (
+            "from-home"
+        )
+        assert not (Path(_isolate_qdrant_home) / "qdrant.json").exists()
+
+    def test_note_status_never_touches_the_member_dir(
+        self, qdrant_provider, _isolate_qdrant_home
+    ):
+        before = _member_dir_snapshot()
+        qdrant_provider._note_status(last_store="probe")
+        assert _member_dir_snapshot() == before, "status write hit the member dir"
+        state = Path(_isolate_qdrant_home) / "qdrant-status.json"
+        assert json.loads(state.read_text())["last_store"] == "probe"
+
+    def test_config_file_is_owner_only(self, tmp_path):
+        """The state file may carry an API key, so it is 0600 like its siblings."""
+        import stat as stat_module
+
+        home = tmp_path / "home"
+        QdrantMemoryProvider().save_config({"api_key": "secret"}, str(home))
+        mode = (home / "qdrant.json").stat().st_mode
+        assert stat_module.S_IMODE(mode) == 0o600, oct(stat_module.S_IMODE(mode))
 
 
 # ---------------------------------------------------------------------------
@@ -1083,7 +1180,7 @@ class TestProgressDisplay:
 
         The fixture supplies no config at all, so this really is the default
         branch — it must not depend on whether the machine running the suite
-        has a config.json (see the fixture's docstring).
+        has a state file (see the fixture's docstring).
         """
         assert qdrant_provider._progress_mode == "minimal"
 
@@ -1208,7 +1305,10 @@ class TestPrefetchDedup:
 
 
 class TestStatusBookkeeping:
-    """status.json answers 'when did this last store/recall?' from a fresh process."""
+    """``qdrant-status.json`` answers 'when did this last store/recall?'
+
+    From a fresh process, with no live connection.
+    """
 
     def test_note_status_roundtrip(self, qdrant_provider, tmp_path, monkeypatch):
         monkeypatch.setattr(

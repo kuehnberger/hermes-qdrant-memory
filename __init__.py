@@ -97,21 +97,50 @@ PLUGIN_VERSION = "0.1.2"
 # Config loading
 # ---------------------------------------------------------------------------
 
-def _config_json_path() -> Any:
-    """``config.json`` sitting next to THIS file — wherever the plugin is installed.
+def _state_home(hermes_home: str | None = None) -> Any:
+    """The profile home whose ROOT holds this provider's two state files.
 
-    The install location varies (bundled tree, ``~/.hermes/plugins/<name>/``, a
-    pip entry point), so the path is derived from ``__file__`` rather than
-    assumed. It stays a dict on disk rather than a config.yaml read because
-    ``hermes memory setup`` and the dashboard both route through
-    ``MemoryProvider.save_config()``, which is contractually file-based.
+    Deliberately NOT the plugin directory. The plugin dir is a *build input*:
+    ``pm.workspace.members_stamp()`` hashes every file inside it — its
+    ``_MEMBER_EXCLUDE`` names only ``.git``/``.venv``/``venv``/``node_modules``/
+    ``__pycache__``, so ``status.json`` and ``config.json`` are hashed too — and
+    folds that hash into the venv dependency stamp. One byte written next to the
+    module therefore invalidated the environment and re-synced dependencies on
+    every launch. Writing beside the module also fails outright on a read-only
+    (pip/system) install.
+
+    This is the convention, not a workaround unique to us: sibling providers
+    keep their state in the home root (``mem0.json``, ``honcho.json``,
+    ``supermemory.json``).
+
+    Precedence: the ``hermes_home`` ``save_config()`` was handed → the process's
+    context-local override / ``HERMES_HOME`` → ``~/.hermes``.
     """
     from pathlib import Path as _Path
-    return _Path(__file__).resolve().parent / "config.json"
+    if hermes_home is not None and str(hermes_home).strip():
+        return _Path(str(hermes_home).strip())
+    try:
+        from hermes_constants import get_hermes_home
+        return _Path(get_hermes_home())
+    except Exception:
+        import os as _os
+        env = _os.environ.get("HERMES_HOME", "").strip()
+        return _Path(env) if env else _Path.home() / ".hermes"
+
+
+def _config_json_path(hermes_home: str | None = None) -> Any:
+    """``<HERMES_HOME>/qdrant.json`` — outside the plugin member dir.
+
+    Was ``<plugin dir>/config.json``. It stays a dict on disk rather than a
+    config.yaml read because ``hermes memory setup`` and the dashboard both
+    route through ``MemoryProvider.save_config()``, which is contractually
+    file-based; only the directory moved (see :func:`_state_home`).
+    """
+    return _state_home(hermes_home) / "qdrant.json"
 
 
 def _load_plugin_config() -> dict:
-    """Read saved provider config: env < config.yaml's ``memory.qdrant`` < config.json.
+    """Read saved provider config: env < config.yaml's ``memory.qdrant`` < state file.
 
     Precedence, lowest to highest:
 
@@ -119,8 +148,8 @@ def _load_plugin_config() -> dict:
     2. ``QDRANT_URL`` / ``QDRANT_API_KEY`` from the environment (cloud deploys
        and the dashboard's secret writer, which routes secrets to ``.env``)
     3. ``memory.qdrant:`` in config.yaml, for homes that set knobs directly
-    4. ``config.json`` next to this module, which is what ``save_config()``
-       writes via ``hermes memory setup`` and the dashboard
+    4. ``<HERMES_HOME>/qdrant.json``, which is what ``save_config()`` writes
+       via ``hermes memory setup`` and the dashboard
 
     A malformed or missing file yields no override rather than an error, so a
     bad hand-edit can never take memory offline.
@@ -147,11 +176,12 @@ def _load_plugin_config() -> dict:
                 merged.update(disk)
     except Exception as e:
         logger.warning(
-            "Qdrant config.json unreadable, using config.yaml/env only: %s", e
+            "Qdrant state file (<HERMES_HOME>/qdrant.json) unreadable, "
+            "using config.yaml/env only: %s", e
         )
 
     # Secrets live in the env, not the config file — read them last so a
-    # rotated key takes effect without touching config.json. ``get_secret``
+    # rotated key takes effect without rewriting ``qdrant.json``. ``get_secret``
     # raises UnscopedSecretError under a multiplex gateway with no bound
     # scope, and a config read must never take memory down: skip the env
     # override rather than propagate.
@@ -228,6 +258,10 @@ class QdrantMemoryProvider(MemoryProvider):
         self._status_callback: Any = None
         self._progress_mode: str = self._config.get("progress", "minimal")
         self._last_recall_count: int = 0
+        # Profile home, captured from initialize()'s scoping kwargs (or left
+        # empty so _state_home() resolves it from the environment). It decides
+        # where qdrant.json / qdrant-status.json live — never the plugin dir.
+        self._hermes_home: str = ""
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -325,6 +359,10 @@ class QdrantMemoryProvider(MemoryProvider):
         # CLI/TUI/gateway renders. We never call it directly — only through
         # _emit_progress() which respects the progress mode config.
         self._status_callback = kwargs.get("status_callback")
+        # Which profile's home holds our state files. The orchestrator passes
+        # it as a scoping kwarg; an empty value lets _state_home() fall back to
+        # the process's own HERMES_HOME / context override.
+        self._hermes_home = str(kwargs.get("hermes_home") or "").strip()
 
         # Create collection if it doesn't exist.
         # The collection MUST declare a NAMED vector "dense" because sync_turn /
@@ -763,16 +801,19 @@ class QdrantMemoryProvider(MemoryProvider):
         return list(ALL_TOOL_SCHEMAS)
 
     def save_config(self, values: dict, hermes_home: str) -> None:
-        """Write provider config values to disk (config.json next to this module).
+        """Write provider config values to disk (``<HERMES_HOME>/qdrant.json``).
 
         Called by ``hermes memory setup`` (hermes_cli/memory_setup.py) and by the
-        dashboard's memory-provider route. Writes next to the module rather than
-        into a hardcoded ``plugins/memory/<name>/`` path so it lands beside this
-        copy no matter which install location discovery picked.
+        dashboard's memory-provider route. The file lives in the profile home
+        rather than beside this module so the member directory stays byte-stable
+        — see :func:`_state_home`. ``hermes_home`` is honoured when the wizard
+        passes one; an empty string (the standalone ``_setup.py``) falls back to
+        the process home.
         """
         import json as _json
+        import os as _os
 
-        cfg_path = _config_json_path()
+        cfg_path = _config_json_path(hermes_home)
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         existing = {}
         if cfg_path.exists():
@@ -783,7 +824,16 @@ class QdrantMemoryProvider(MemoryProvider):
         if not isinstance(existing, dict):
             existing = {}
         existing.update(values or {})
-        cfg_path.write_text(_json.dumps(existing, indent=2))
+        # Atomic (tmp + replace) so a reader never sees a truncated file, and
+        # 0600 because this file may carry a Qdrant API key — the mode the
+        # sibling providers keep theirs at.
+        tmp = cfg_path.with_name(cfg_path.name + ".tmp")
+        tmp.write_text(_json.dumps(existing, indent=2))
+        try:
+            _os.chmod(tmp, 0o600)
+        except OSError:  # platform without POSIX modes
+            pass
+        _os.replace(tmp, cfg_path)
 
     def backup_paths(self) -> list[str]:
         """Paths outside HERMES_HOME for hermes backup/import (none for Qdrant)."""
@@ -1183,14 +1233,19 @@ class QdrantMemoryProvider(MemoryProvider):
             # A progress display failure must never break memory operations
             pass
 
-    @staticmethod
-    def _status_json_path() -> Any:
-        """``status.json`` next to this module (same rule as config.json)."""
-        from pathlib import Path as _Path
-        return _Path(__file__).resolve().parent / "status.json"
+    def _status_json_path(self) -> Any:
+        """``<HERMES_HOME>/qdrant-status.json`` — outside the plugin member dir.
+
+        Was ``<plugin dir>/status.json``, which is rewritten on every
+        store/recall and therefore re-synced the venv on every launch (see
+        :func:`_state_home`). Not a staticmethod any more: the profile home
+        comes from ``initialize()``'s scoping kwargs.
+        """
+        home = _state_home(getattr(self, "_hermes_home", "") or None)
+        return home / "qdrant-status.json"
 
     def _note_status(self, **fields: Any) -> None:
-        """Merge last-operation bookkeeping into status.json — best effort.
+        """Merge last-operation bookkeeping into ``qdrant-status.json`` — best effort.
 
         Small atomic write (tmp + os.replace) so a reader never sees a
         truncated file, and a failure here is swallowed: observability must
@@ -1216,14 +1271,15 @@ class QdrantMemoryProvider(MemoryProvider):
             tmp.write_text(_json.dumps(state, indent=1))
             _os.replace(tmp, path)
         except Exception as e:
-            logger.debug("status.json write failed (non-fatal): %s", e)
+            logger.debug("qdrant-status.json write failed (non-fatal): %s", e)
 
     def get_status_config(self, provider_config: dict) -> dict:
         """Config block for `hermes memory status` (core calls this hook).
 
         Config keys the CLI cannot know by itself, plus the last store/recall
-        from status.json so a fresh process can answer "is this thing alive?"
-        without a live connection. api_key is never displayed.
+        from ``<HERMES_HOME>/qdrant-status.json`` so a fresh process can answer
+        "is this thing alive?" without a live connection. api_key is never
+        displayed.
         """
         import json as _json
         cfg = dict(provider_config or {})

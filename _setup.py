@@ -30,15 +30,33 @@ from pathlib import Path
 
 logger = logging.getLogger("hermes.plugins.memory.qdrant.setup")
 
-# Mirrors the module-relative path in __init__.py: this file is a SIBLING of the
-# provider module, so the config lands next to the code in every install layout
-# (bundled tree, ~/.hermes/plugins/<name>/, pip entry point).
-CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
+def _config_file() -> Path:
+    """Where ``save_config()`` writes — resolved, never module-relative.
+
+    The config lives in the profile home (``<HERMES_HOME>/qdrant.json``), not
+    beside this file: the plugin directory is a build input that
+    ``pm.workspace.members_stamp()`` hashes, so writing there re-synced the venv
+    on every launch. Resolved through the provider's own helper so the two can
+    never disagree about the path.
+    """
+    try:
+        from plugins.memory.qdrant import _config_json_path
+        return Path(_config_json_path())
+    except Exception:
+        pass
+    try:
+        from hermes_constants import get_hermes_home
+        home = Path(get_hermes_home())
+    except Exception:
+        import os
+        raw = os.environ.get("HERMES_HOME", "").strip()
+        home = Path(raw).expanduser() if raw else Path.home() / ".hermes"
+    return home / "qdrant.json"
 
 
 def _existing() -> dict:
     try:
-        data = json.loads(CONFIG_FILE.read_text())
+        data = json.loads(_config_file().read_text())
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -90,7 +108,8 @@ def run_setup() -> int:
         api_key = current.get("api_key", "")
         print(f"  URL: {url}")
 
-    print("\n[2/4] API key (blank for a local server; stored in config.json)")
+    print("\n[2/4] API key (blank for a local server; "
+          "stored in <HERMES_HOME>/qdrant.json)")
     if api_key:
         print(f"  Keeping existing key ...{api_key[-4:]}")
         if input("  Replace it? [y/N]: ").strip().lower() != "y":
@@ -121,7 +140,7 @@ def run_setup() -> int:
         "collection": collection,
     }, "")
 
-    print(f"\nConfig written to {CONFIG_FILE}")
+    print(f"\nConfig written to {_config_file()}")
     print("\nEnable the provider:")
     print("    hermes memory provider qdrant")
     print("or in config.yaml:    memory:\n      provider: qdrant")

@@ -109,9 +109,9 @@ hermes memory setup qdrant
 ```
 
 That path activates the provider and installs its dependencies, but it does
-**not** prompt for settings. To configure by hand, create `config.json` next to
-the plugin's `__init__.py` (it is `.gitignore`d and chmod 0600, because it can
-hold an API key):
+**not** prompt for settings. To configure by hand, create `<HERMES_HOME>/qdrant.json`
+(`0600`, because it can hold an API key) — `~/.hermes/qdrant.json` for the
+default profile, `~/.hermes/profiles/<name>/qdrant.json` for a profile:
 
 ```json
 {
@@ -121,6 +121,10 @@ hold an API key):
   "distance": "Cosine"
 }
 ```
+
+Do **not** put it in the plugin directory. That directory is a build input:
+Hermes hashes every file in it into its dependency stamp, so any state written
+there re-syncs the venv on every launch.
 
 Verify with `hermes memory status`. `QDRANT_URL` and `QDRANT_API_KEY` are
 optional environment overrides — a local server on the default URL needs
@@ -143,9 +147,9 @@ neither.
 | `device` | select | `cpu` | `auto`, `cpu` — `cuda` requires the `sentence-transformers` backend |
 
 Resolution order, lowest to highest: built-in defaults → `config.yaml`'s
-`memory.qdrant` → `config.json` → `QDRANT_URL` / `QDRANT_API_KEY` from the
-environment. Secrets are read through Hermes' scoped-secret path and are never
-written into `config.yaml`.
+`memory.qdrant` → `<HERMES_HOME>/qdrant.json` → `QDRANT_URL` / `QDRANT_API_KEY`
+from the environment. Secrets are read through Hermes' scoped-secret path and
+are never written into `config.yaml`.
 
 ## Embeddings
 
@@ -180,7 +184,8 @@ embedding model; the mismatch surfaces as a write error, not a config error.
 ## Back up, restore, move
 
 Memories live in the Qdrant collection — the plugin keeps no local state
-besides `config.json`, so moving or backing up means moving the server's data:
+besides `<HERMES_HOME>/qdrant.json` (and the `qdrant-status.json` bookkeeping
+next to it), so moving or backing up means moving the server's data:
 
 - **Snapshot** (recommended): `POST /collections/<name>/snapshots` (dashboard
   UI does the same) writes a snapshot file **including vectors** — restoring it
@@ -214,7 +219,7 @@ Documented here so nobody has to read the source to find out:
 
 ## Troubleshooting
 
-**`hermes update` says qdrant is "configured but not installed" / "not in catalog"** — known cosmetic false negative: the catalog check runs before user plugins register. Do NOT reinstall or switch `memory.provider`. `hermes update` touches the core venv and checkout only; it does NOT touch `~/.hermes/plugins/qdrant/`, `config.json`, or the Qdrant server data. Confirm health with:
+**`hermes update` says qdrant is "configured but not installed" / "not in catalog"** — known cosmetic false negative: the catalog check runs before user plugins register. Do NOT reinstall or switch `memory.provider`. `hermes update` touches the core venv and checkout only; it does NOT touch `~/.hermes/plugins/qdrant/`, `<HERMES_HOME>/qdrant.json`, or the Qdrant server data. Confirm health with:
 
 ```bash
 hermes plugins list    # qdrant shows enabled
