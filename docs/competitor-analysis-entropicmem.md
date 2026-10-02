@@ -25,7 +25,8 @@ The headline finding: **we are ahead on the properties that matter most**
 | Tests | 895 | 134 (plus 2,451 lines of test code) |
 | CLI commands | 34 | 0 |
 | Screenshots | 5 | 0 |
-| Eval harness | `evals/` with datasets + baselines | `scripts/retrieval_eval.py` (36-query paraphrase corpus, recall@k/MRR/nDCG@5) — **added 2026-10-02, `fc18af9`**, closing the gap this table recorded |
+| Eval harness | `evals/` with datasets + baselines | `scripts/retrieval_eval.py` (36 targets + 36 same-topic distractors; recall@k with 95% CI, MRR, nDCG@5, per-case decision margin) — **added 2026-10-02**, closing the gap this table recorded |
+| Runtime install size | not measured | **206 MB**, zero torch (measured 2026-10-02) |
 
 A 34-command CLI is a **second user interface** layered on top of the tool
 surface, and it must be documented, tested, and kept in sync. We have no reason
@@ -108,8 +109,17 @@ class of bug is live in our `_tool_*` dispatch. Effort S.
 ### 4. A CI budget test
 
 `tests/evals/test_ci_budget.py` asserts the fast suite **never imports the ML
-stack** and finishes in ≤60s. This directly protects our 287 MB-vs-2.2 GB
-fastembed advantage from silently regressing. Effort S.
+stack** and finishes in ≤60s. This protects our footprint advantage from
+silently regressing. Effort S.
+
+**STATUS: PARTIALLY ADOPTED 2026-10-02, and it caught a real defect.** We now
+measure the advantage instead of asserting it, and the measurement found that
+our own claim was wrong: `sentence-transformers` was still in `dependencies`,
+so every install pulled `torch` (711 MB in our dev venv). After moving it to
+an optional `gpu` extra, a clean runtime-only resolve is **206 MB with zero
+torch/nvidia/triton**, against ~1.2 GB before. The CI-budget test itself is
+still not written — worth doing, because nothing currently stops a future
+dependency edit from quietly re-adding torch.
 
 ### 5. Atomic config writes
 

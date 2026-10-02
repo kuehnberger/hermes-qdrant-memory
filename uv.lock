@@ -322,6 +322,10 @@ source = { virtual = "." }
 dependencies = [
     { name = "fastembed" },
     { name = "qdrant-client" },
+]
+
+[package.optional-dependencies]
+gpu = [
     { name = "sentence-transformers" },
 ]
 
@@ -337,8 +341,9 @@ dev = [
 requires-dist = [
     { name = "fastembed", specifier = ">=0.4.0,<1" },
     { name = "qdrant-client", specifier = ">=1.10.0,<2" },
-    { name = "sentence-transformers", specifier = ">=2.7.0,<7" },
+    { name = "sentence-transformers", marker = "extra == 'gpu'", specifier = ">=2.7.0,<7" },
 ]
+provides-extras = ["gpu"]
 
 [package.metadata.requires-dev]
 dev = [

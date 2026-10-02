@@ -324,8 +324,12 @@ class Embedder:
         except ImportError as e:
             raise EmbeddingConfigError(
                 "embedder backend 'sentence-transformers' is not installed "
-                f"({e}). Install it, or set memory.qdrant.embedder to "
-                "'fastembed'.",
+                f"({e}). It is an optional extra because it pulls PyTorch "
+                "(~1.2 GB on disk). Install it with "
+                "`hermes plugins install qdrant` and then approve the "
+                "sentence-transformers dependency, or set "
+                "memory.qdrant.embedder to 'fastembed' (the default, no "
+                "PyTorch, ~287 MB peak RSS).",
                 model=self.model, backend=self.backend,
             ) from e
         kwargs = {}

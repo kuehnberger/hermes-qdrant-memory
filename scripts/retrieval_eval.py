@@ -39,7 +39,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from statistics import mean
+from statistics import mean, median
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EVAL_COLLECTION = "hermes_memories_eval"
@@ -96,7 +96,7 @@ CASES: list[tuple[str, str]] = [
     ("The user's passport expires in September 2027 — renew by June.",
      "When does the user's passport expire?"),
     ("User writes tests before implementation; never merge without green CI.",
-     "What is the user's workflow preference for writing code?"),
+     "How does the user approach writing code — do they test first?"),
     ("The cafe on Elm Street makes the oat flat white the user likes.",
      "Where does the user get their favourite oat milk drink?"),
     ("User's laptop is a ThinkPad X13; dock firmware must stay on 2.1.",
@@ -218,6 +218,24 @@ def ndcg_at_k(ranks: list[int | None], k: int) -> float:
     return mean(gains)
 
 
+def wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for a proportion.
+
+    A point estimate on 36 cases reads as a measurement far more precise than
+    it is: recall@1 = 0.861 is 31/36, and a corpus reworded slightly could sit
+    anywhere in a wide band. Wilson (not normal-approximation) because the
+    counts are small and the proportion is near 1, where the normal interval is
+    badly wrong. No SciPy dependency: the arithmetic is four lines.
+    """
+    if n == 0:
+        return (0.0, 0.0)
+    phat = successes / n
+    denom = 1 + z * z / n
+    centre = (phat + z * z / (2 * n)) / denom
+    half = (z / denom) * ((phat * (1 - phat) / n + z * z / (4 * n * n)) ** 0.5)
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
 def percentile(values: list[float], pct: float) -> float:
     """Nearest-rank percentile (deterministic, no interpolation surprises)."""
     if not values:
@@ -299,6 +317,12 @@ def run(keep: bool = False) -> dict:
     # cannot tell them apart, this can.
     confusion_wins = 0
     confusion_losses: list[str] = []
+    # |score(target) - score(its own distractor)| for every decidable case.
+    # THIS is the number that predicts real-world reliability: recall@1 says
+    # how often the target won, this says by how much. Measured margins of
+    # 0.01-0.09 on a 0-1 cosine scale mean several cases are coin-flips that
+    # any corpus reword could flip.
+    margins: list[float] = []
 
     try:
         # Seed through the real tool path (embed + named-vector upsert):
@@ -346,6 +370,10 @@ def run(keep: bool = False) -> dict:
                 confusion_wins += 1
             else:
                 confusion_losses.append(query)
+            if rank is not None and distractor_rank is not None:
+                s_t = next(s for s, t in hits if t == memory)
+                s_d = next(s for s, t in hits if t == distractor)
+                margins.append(abs(s_t - s_d))
 
         decidable = confusion_wins + len(confusion_losses)
         report = {
@@ -359,10 +387,17 @@ def run(keep: bool = False) -> dict:
             "ndcg@5": ndcg_at_k(ranks, 5),
             # 1.0 = target always outranks its own distractor within the
             # window; None when no case had both visible (nothing decided).
-            "beat_distractor": (
+            "beats_distractor": (
                 confusion_wins / decidable if decidable else None
             ),
             "confusion_losses": confusion_losses,
+            # Confidence band, so a point estimate is not read as precision.
+            "recall@1_ci95": wilson_interval(
+                sum(1 for r in ranks if r == 1), len(ranks)
+            ),
+            "margin_median": median(margins) if margins else None,
+            "margin_min": min(margins) if margins else None,
+            "margins_under_0_10": sum(1 for m in margins if m < 0.10),
             "latency_mean_ms": mean(latencies),
             "latency_p95_ms": percentile(latencies, 95),
             "misses": misses[:5],
@@ -396,14 +431,22 @@ def main(argv: list[str] | None = None) -> int:
           f"same-topic distractors, one paraphrased query per target")
     print(f"window: top-{report['limit']}  |  collection: {EVAL_COLLECTION}")
     print()
-    beat = report.get("beat_distractor")
+    beat = report.get("beats_distractor")
     beat_note = f"{beat:.3f}" if beat is not None else "n/a (no pair visible)"
-    print(f"  recall@1   {report['recall@1']:.3f}")
+    lo, hi = report["recall@1_ci95"]
+    print(f"  recall@1   {report['recall@1']:.3f}  (95% CI {lo:.2f}-{hi:.2f}, "
+          f"n={report['corpus']})")
     print(f"  recall@5   {report['recall@5']:.3f}")
     print(f"  recall@10  {report['recall@10']:.3f}")
     print(f"  MRR        {report['mrr']:.3f}")
     print(f"  nDCG@5     {report['ndcg@5']:.3f}")
-    print(f"  beats its distractor  {beat_note}")
+    print(f"  beats its own distractor  {beat_note}")
+    if report.get("margin_median") is not None:
+        print(f"  margin vs distractor      median "
+              f"{report['margin_median']:.3f}, min {report['margin_min']:.3f}, "
+              f"{report['margins_under_0_10']} case(s) decided by <0.10")
+        print("    (a margin that small is a coin-flip: one reworded memory "
+              "can flip it)")
     print(f"  latency    mean {report['latency_mean_ms']:.1f} ms, "
           f"p95 {report['latency_p95_ms']:.1f} ms")
     if report.get("confusion_losses"):

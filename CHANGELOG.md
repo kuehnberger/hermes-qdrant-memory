@@ -44,6 +44,18 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **`sentence-transformers` is now an optional extra (`gpu`), not a hard
+  dependency.** It was in `dependencies`, so every install pulled `torch`
+  transitively — 711 MB of torch in our own dev venv, ~1.2 GB of
+  site-packages — while the default `fastembed` backend never imports it. The
+  "sleek, no-torch default" claim was therefore true of peak RSS (287 MB) and
+  false of disk. Measured on a clean runtime-only resolve after the split:
+  **206 MB**, zero `torch` / `nvidia-*` / `triton`. Selecting the absent
+  backend raises an error naming the extra and how to install it — verified
+  end-to-end in a torch-free venv, where the default path embeds and searches
+  normally. `hermes plugins install` has no `--extra` flag, so the install
+  path is approving the dependency or `pip install
+  'hermes-plugin-qdrant[gpu]'`.
 - Tool count 5 → 6, propagated to `plugin.yaml` `provides_tools`, README and
   CONTRIBUTING. The docs-honesty gate caught all four stale claims itself.
 
@@ -63,6 +75,19 @@ All notable changes to this project are documented here. The format is based on
   cleanup self-healing instead of a one-off. Literal names only, never globs, so
   a real plugin input can never be matched; never raises (a read-only pip
   install degrades to debug logging), and reports what it removed.
+- The eval harness now reports a **95% Wilson interval** on recall@1 and the
+  **per-case decision margin** (target score minus its paired distractor's).
+  A point estimate on 36 cases reads as far more precise than it is:
+  recall@1 0.861 is 31/36, with a 95% CI of 0.71-0.94, and 10 of 36 cases
+  decided by a margin under 0.10 (minimum 0.010). The margin is the number
+  that predicts real-world reliability; quoting three decimals without it
+  was false confidence.
+- One eval query was repaired. The query "What is the user's workflow
+  preference for writing code?' shared no vocabulary with its target ("writes
+  tests before implementation"), while its distractor ("prefers pair
+  programming") echoed the query's own word and outranked the target at a
+  stable rank 6. That was a corpus defect, not a model failure: recall@1
+  0.861 -> 0.889.
 - The eval harness parser now strips the point ID from `[0.72] (id) text` and
   accepts signed scores (`[-0.02]`). Both were introduced by output changes the
   harness predated: without them every case compared as a miss (recall would

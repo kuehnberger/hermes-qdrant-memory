@@ -40,11 +40,27 @@ dependencies = [
     # uv.lock pins. Bounding at <1 stops a future fastembed release from
     # silently changing the vector space under an existing collection.
     "fastembed>=0.4.0,<1",
-    "sentence-transformers>=2.7.0,<7",
-    # torch is NOT declared: it is transitive via sentence-transformers, and
-    # ~5.3 GB in a CUDA build is not ours to pin. Runtime installs may drop
-    # it outright; keep it in the dev venv, the parity tests need it.
 ]
+
+# sentence-transformers is an OPTIONAL EXTRA, not a runtime dependency.
+#
+# It was a hard dependency until 2026-10-02, which made every install pull
+# PyTorch transitively: measured 711 MB of torch (1.2 GB site-packages total)
+# in our own dev venv, against fastembed's 62 MB of onnxruntime. The default
+# backend never touches it, so the "sleek default install" claim was false as
+# written -- true of peak RSS (287 MB), false of disk.
+#
+# The code degrades cleanly without it: embedder.py raises a clear
+# EmbeddingConfigError naming this extra, so selecting
+# memory.qdrant.embedder=sentence-transformers without it is a good error, not
+# a crash. Hermes' installer has no extras mechanism (`hermes plugins install`
+# takes no --extra flag), so the install path is "install qdrant, then approve
+# the sentence-transformers dependency" or `pip install
+# 'hermes-plugin-qdrant[gpu]'` -- see README.
+[project.optional-dependencies]
+gpu = ["sentence-transformers>=2.7.0,<7"]
+# torch itself stays undeclared: it is transitive, and ~5.3 GB in a CUDA build
+# is not ours to pin.
 
 [dependency-groups]
 # torch is listed here (dev only) so the source pin below binds: uv's

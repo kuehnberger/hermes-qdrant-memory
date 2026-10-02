@@ -49,17 +49,35 @@ session.
   |---|---|---|
   | `qdrant-client` | `>=1.10.0,<2` | 1.10.0 is the oldest floor with `query_points` / `Prefetch` / `FusionQuery` |
   | `fastembed` | `>=0.4.0,<1` | default embedder — ONNX, no torch, ~287 MB peak RSS |
-  | `sentence-transformers` | `>=2.7.0,<7` | opt-in GPU backend — **heavy**, see below |
 
-`torch` comes in transitively and is intentionally not pinned here.
+**That's the whole default install.** Two runtime dependencies, and neither
+reaches `torch`. Measured on a clean runtime-only resolve (2026-10-02):
+**206 MB** of site-packages, zero `torch` / `nvidia-*` / `triton` — against
+**~1.2 GB** when `sentence-transformers` was still a hard dependency. The
+largest single item is `onnxruntime` at 62 MB. No GPU, no CUDA, no 5 GB of
+wheels you never import.
 
-> **Size warning.** `sentence-transformers` is the heavy dependency: it pulls
-> `torch` plus the CUDA wheels — measured at 1.2 GB of `torch`, 3.2 GB of
-> `nvidia-*` and 895 MB of `triton` in a CUDA build, ~5.3 GB total. The
-> default `fastembed` backend needs none of it. The wide `>=2.7.0,<7` span is
-> deliberate — a tight pin would freeze users onto an old dependency and miss
-> upstream security fixes. If you only intend to use a remote Qdrant endpoint,
-> you can skip the local embedder entirely; see the `embedder` config key above.
+| | default (fastembed) | with `gpu` extra |
+|---|---|---|
+| install size, runtime deps only | **206 MB** | ~1.2 GB (CPU torch) to ~5.3 GB (CUDA) |
+| peak RSS embedding | 287 MB | 2,191 MB |
+| time to first embed | 0.01 s | 18.24 s |
+| works on | CPU-only hosts | GPU hosts |
+
+`sentence-transformers` is now an **optional extra** (`gpu`), because it was
+never needed by the default path. If you want it: `pip install
+'hermes-plugin-qdrant[gpu]'`, or set `memory.qdrant.embedder` to
+`sentence-transformers` and approve the dependency when Hermes asks. Selecting
+it without it installed fails with an error naming this extra, not a crash.
+`torch` itself stays undeclared — it is transitive, and ~5.3 GB in a CUDA
+build is not ours to pin. The wide `>=2.7.0,<7` span is deliberate: a tight
+pin would freeze users onto an old dependency and miss upstream security
+fixes.
+
+Sleekness is a deliberate trade, and this is what it costs: the default model
+is a 384-dimension MiniLM because it fits in 206 MB and needs no GPU. It is
+not the strongest embedder available. See
+[Evaluation](#evaluation) for what that costs in recall, measured.
 
 > **If you uninstall torch, it can come back silently.** Removing `torch`
 > (or the `nvidia-*` / `triton` wheels) is safe while the default `fastembed`
@@ -272,8 +290,8 @@ tests against the real core instead of the stubs.
 it: 36 target memories with one paraphrased recall query each, plus 36
 same-topic near-miss distractors, all run through the real tool path
 (`qdrant_upsert` / `qdrant_search`, same embedding, same formatting the model
-sees), reported as recall@1/5/10, MRR, nDCG@5, a pairwise *beats its own
-distractor* rate, and latency:
+sees), reported as recall@1/5/10 with a 95% Wilson interval, MRR, nDCG@5, a
+pairwise *beats its own distractor* rate, and latency:
 
 ```bash
 python scripts/retrieval_eval.py                      # report only
@@ -292,11 +310,22 @@ The catalog has more than one memory provider, and the honest summary is that
 they make different trade-offs. Two properties are worth comparing directly,
 because they are the ones you feel on a laptop.
 
-**Startup and disk cost.** The default backend here is `fastembed` (ONNX
-Runtime, CPU-only): ~287 MB peak RSS, no `torch` in the install. Providers
-built on `sentence-transformers` pull `torch` transitively and, in a CUDA
-build, ~5.3 GB with it. If you only ever recall a handful of memories, that
-difference dominates every other one.
+**Footprint: 206 MB, no GPU, no torch.** This is the difference you feel
+first, and it is deliberate rather than incidental. The default install is two
+dependencies — `qdrant-client` and `fastembed` — totalling **206 MB** with
+**zero** `torch`, `nvidia-*` or `triton` packages (measured on a clean
+runtime-only resolve). A provider built on `sentence-transformers` pulls
+`torch` transitively: ~1.2 GB for a CPU build, ~5.3 GB once CUDA wheels are
+involved. That extra weight buys a faster embedder on a GPU host and nothing
+else — on a CPU-only machine it buys slower first-embed (0.01 s vs 18.24 s for
+ours) and a slower start, because the default is the lighter path by
+construction.
+
+We report the recall that trade costs rather than hiding it: on our shipped
+eval harness the default 384-dim model scores recall@1 0.889 (95% CI
+0.75–0.96) against same-topic distractors, with a median margin of 0.17 and
+10 of 36 cases decided by less than 0.10. If you want the stronger embedder
+and have the disk and the GPU, install the `gpu` extra and measure it yourself.
 
 **Retrieval honesty.** A provider that cannot reach its backend should say
 *which* failure it is — a bad config versus a dead server — rather than

@@ -10,6 +10,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "retrieval_eval.py"
 
 
@@ -56,6 +58,29 @@ def test_ndcg_at_k_single_relevant_doc():
     assert abs(mod.ndcg_at_k([2], 5) - 1 / 1.584962500721156) < 1e-6
     assert mod.ndcg_at_k([7], 5) == 0.0
     assert mod.ndcg_at_k([None], 5) == 0.0
+
+
+def test_wilson_interval_brackets_the_point_estimate():
+    mod = _load()
+    # 31/36 = 0.861 — the interval must contain it and be asymmetric (the
+    # normal approximation is badly wrong this close to 1 with n this small).
+    lo, hi = mod.wilson_interval(31, 36)
+    assert lo < 31 / 36 < hi
+    assert hi - lo > 0.10, "a 36-case proportion cannot be this precise"
+    # hand-checked: phat=0.86111, denom=1+z^2/n=1.106711, centre=0.826200,
+    # half=(z/denom)*sqrt(phat(1-phat)/n + z^2/4n^2)=0.112900
+    assert (lo, hi) == pytest.approx((0.7133, 0.9391), abs=5e-4)
+    # Perfect and empty are the degenerate ends, still bounded.
+    assert mod.wilson_interval(36, 36)[1] == 1.0
+    assert mod.wilson_interval(0, 36)[0] == 0.0
+    assert mod.wilson_interval(0, 0) == (0.0, 0.0)
+
+
+def test_wilson_narrows_as_n_grows():
+    mod = _load()
+    narrow = (lambda lo_hi: lo_hi[1] - lo_hi[0])(mod.wilson_interval(310, 360))
+    wide = (lambda lo_hi: lo_hi[1] - lo_hi[0])(mod.wilson_interval(31, 36))
+    assert narrow < wide, "more cases must give a tighter interval"
 
 
 def test_percentile_nearest_rank():

@@ -238,3 +238,99 @@ class TestDeclarationParity:
             f"handle_tool_call dispatches {sorted(extra)} but no schema "
             f"declares them — the tool would be invisible to the agent"
         )
+
+
+class TestDependencyFootprint:
+    """The 206 MB / no-torch default is a FEATURE, so it needs a test.
+
+    `sentence-transformers` was a hard dependency until 2026-10-02, which meant
+    every install pulled `torch` transitively (711 MB measured in our dev venv)
+    while the default backend never imports it. Nothing failed when it was
+    moved to an optional `gpu` extra — the suite stayed green either way —
+    which is exactly why it needs an assertion rather than a convention.
+
+    This is the "CI budget test" the competitor analysis flagged as an adopt
+    (tests/evals/test_ci_budget.py on the peer side). It guards the resolve
+    graph, not the filesystem: a size assertion would be host-dependent, but
+    "is torch reachable from the runtime dependencies" is not.
+    """
+
+    def _runtime_dep_names(self):
+        import re
+        from pathlib import Path
+
+        pyproject = (Path(__file__).resolve().parent.parent
+                     / "pyproject.toml").read_text(encoding="utf-8")
+        block = re.search(r"^dependencies\s*=\s*\[(.*?)\]", pyproject, re.S | re.M)
+        assert block, "no [project] dependencies block in pyproject.toml"
+        return {m.group(1).lower()
+                for m in re.finditer(r'"([A-Za-z0-9_.-]+)', block.group(1))}
+
+    def test_sentence_transformers_is_not_a_runtime_dependency(self):
+        deps = self._runtime_dep_names()
+        assert "sentence-transformers" not in deps, (
+            "sentence-transformers is back in [project].dependencies — that "
+            "re-adds torch (~1.2 GB CPU / ~5.3 GB CUDA) to every install"
+        )
+
+    def test_fastembed_and_qdrant_client_remain_runtime_dependencies(self):
+        deps = self._runtime_dep_names()
+        assert "fastembed" in deps, "the default embedder must ship by default"
+        assert "qdrant-client" in deps
+
+    def test_gpu_extra_carries_sentence_transformers_with_bounds(self):
+        import re
+        from pathlib import Path
+
+        pyproject = (Path(__file__).resolve().parent.parent
+                     / "pyproject.toml").read_text(encoding="utf-8")
+        extra = re.search(r"^gpu\s*=\s*\[(.*?)\]", pyproject, re.S | re.M)
+        assert extra, (
+            "no [project.optional-dependencies] gpu extra found — the "
+            "sentence-transformers backend has no declared install path"
+        )
+        spec = extra.group(1)
+        assert "sentence-transformers" in spec
+        assert ">=" in spec and "<" in spec, (
+            f"gpu extra is unbounded: {spec.strip()!r} — catalog rule 9 "
+            "requires an upper bound"
+        )
+
+    def test_torch_is_never_declared_directly(self):
+        """torch is transitive and ~5.3 GB in a CUDA build; pinning it is not
+        ours to do, and declaring it would drag CUDA wheels into resolution."""
+        import re
+        from pathlib import Path
+
+        pyproject = (Path(__file__).resolve().parent.parent
+                     / "pyproject.toml").read_text(encoding="utf-8")
+        runtime = re.search(r"^dependencies\s*=\s*\[(.*?)\]", pyproject, re.S | re.M)
+        extra = re.search(r"^gpu\s*=\s*\[(.*?)\]", pyproject, re.S | re.M)
+        for name, block in (("dependencies", runtime), ("gpu", extra)):
+            if block:
+                assert "torch" not in block.group(1).lower(), (
+                    f"torch is declared in [{name}] — it must stay transitive"
+                )
+
+    def test_lockfile_runtime_resolve_has_no_torch(self):
+        """The graph, not the manifest: nothing may reach torch from the
+        runtime dependency set."""
+        import re
+        from pathlib import Path
+
+        import pytest
+
+        lock = (Path(__file__).resolve().parent.parent / "uv.lock")
+        if not lock.is_file():
+            pytest.skip("uv.lock not present")
+        text = lock.read_text(encoding="utf-8")
+        block = re.search(
+            r'name = "hermes-plugin-qdrant".*?^dependencies = \[(.*?)\]',
+            text, re.S | re.M,
+        )
+        assert block, "could not find the project block in uv.lock"
+        names = {m.group(1).lower()
+                 for m in re.finditer(r'name = "([^"]+)"', block.group(1))}
+        assert "torch" not in names
+        assert "sentence-transformers" not in names
+        assert {"fastembed", "qdrant-client"} <= names
