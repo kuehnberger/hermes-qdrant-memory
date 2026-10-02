@@ -74,6 +74,32 @@ def test_parse_hits_matches_tool_output_format():
     assert mod._parse_hits("No results") == []
 
 
+def test_parse_hits_strips_point_id():
+    """Current _tool_search format is '[0.72] (uuid) text'. The ID must be
+    removed or every case compares as a miss and recall silently scores 0."""
+    mod = _load()
+    uid = "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+    out = (f"[0.91] ({uid}) The user drinks espresso in the morning.\n"
+           f"[0.40] ({uid}) Another memory.")
+    assert mod._parse_hits(out) == [
+        (0.91, "The user drinks espresso in the morning."),
+        (0.40, "Another memory."),
+    ]
+
+
+def test_parse_hits_accepts_signed_scores():
+    """Cosine similarity is negative for distant text; a line the regex
+    cannot parse is a silently uncounted miss."""
+    mod = _load()
+    uid = "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+    assert mod._parse_hits(f"[-0.02] ({uid}) unrelated text") == [
+        (-0.02, "unrelated text")
+    ]
+    assert mod._parse_hits("[-0.02] legacy format without id") == [
+        (-0.02, "legacy format without id")
+    ]
+
+
 def test_dataset_is_sound():
     """Uniqueness and paraphrase shape — a duplicate target would make the
     ranking score meaningless (two identical texts, one 'correct' rank)."""
@@ -87,3 +113,32 @@ def test_dataset_is_sound():
     for memory, query in cases:
         assert memory != query, "query must rephrase, not repeat, the memory"
         assert query not in memories, "query equals some memory verbatim"
+
+
+def test_distractors_are_sound():
+    """A distractor corpus that leaks (duplicates a target, answers its own
+    query's text, or misaligns with CASES) would corrupt the confusion
+    metric silently — the pairing IS the metric's axis."""
+    mod = _load()
+    distractors = mod.DISTRACTORS
+    cases = mod.CASES
+
+    assert len(distractors) == len(cases), (
+        f"distractors ({len(distractors)}) not index-paired to cases "
+        f"({len(cases)}) — the confusion metric depends on the pairing"
+    )
+    assert len(set(distractors)) == len(distractors), "duplicate distractor"
+    assert len(distractors) >= 30, "corpus too small to be meaningful"
+
+    memories = [m for m, _ in cases]
+    queries = [q for _, q in cases]
+    corpus = set(memories) | set(queries)
+    for i, distractor in enumerate(distractors):
+        assert distractor not in corpus, (
+            f"distractor[{i}] duplicates a memory or query"
+        )
+        memory, query = cases[i]
+        assert distractor != memory, f"distractor[{i}] IS its own target"
+        assert distractor not in query and query not in distractor, (
+            f"distractor[{i}] shares full text with its paired query"
+        )

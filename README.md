@@ -269,10 +269,11 @@ tests against the real core instead of the stubs.
 ### Evaluation
 
 `scripts/retrieval_eval.py` measures retrieval quality instead of asserting
-it: a 36-memory corpus with one paraphrased recall query per memory, run
-through the real tool path (`qdrant_upsert` / `qdrant_search`, same embedding,
-same formatting the model sees), reported as recall@1/5/10, MRR, nDCG@5 and
-latency:
+it: 36 target memories with one paraphrased recall query each, plus 36
+same-topic near-miss distractors, all run through the real tool path
+(`qdrant_upsert` / `qdrant_search`, same embedding, same formatting the model
+sees), reported as recall@1/5/10, MRR, nDCG@5, a pairwise *beats its own
+distractor* rate, and latency:
 
 ```bash
 python scripts/retrieval_eval.py                      # report only

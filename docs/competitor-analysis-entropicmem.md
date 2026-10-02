@@ -72,25 +72,31 @@ shared-token coincidence. That is a genuinely careful detail.
 This was our **single biggest evidence gap**: for a vector store, recall quality
 *is* the product, and we had no measurement of it at all.
 
-**STATUS: CLOSED 2026-10-02 (`fc18af9`).** `scripts/retrieval_eval.py` ships
-and runs: a 36-memory corpus with one paraphrased recall query per memory,
-seeded and queried through the real tool path, reporting
-recall@1/5/10 + MRR + nDCG@5 + latency. First run: recall@1 0.944,
-recall@5 1.000, MRR 0.968, nDCG@5 0.976, mean 22.9 ms — reproduced on a second
-run. `--min-recall5` gives the direction-aware floor this section asked for
-(exit 1 below threshold).
+**STATUS: CLOSED 2026-10-02, hardened same day.** `scripts/retrieval_eval.py`
+ships and runs: 36 targets with one paraphrased recall query each, seeded and
+queried through the real tool path, reporting recall@1/5/10 + MRR + nDCG@5 +
+latency. `--min-recall5` gives the direction-aware floor this section asked
+for (exit 1 below threshold).
 
-Two deliberate departures from their harness, recorded so the gap is not
-reopened by assumption:
+The first version had no distractors; the prediction below that they would
+make recall@1 "far less flattering" was **correct** — hardening (36 same-topic
+near-miss distractors, one per case, plus a pairwise beats-its-distractor
+metric) moved the numbers on the same model and corpus:
+
+| | no distractors | with same-topic distractors |
+|---|---|---|
+| recall@1 | 0.944 | **0.861** |
+| recall@5 | 1.000 | **0.972** |
+| MRR | 0.968 | **0.921** |
+| nDCG@5 | 0.976 | **0.931** |
+| beats its distractor | n/a | **0.917** (3 losses, listed) |
+
+The remaining deliberate departure from their harness, recorded so the gap is
+not reopened by assumption:
 - **No injected-noise experiment.** Their `noise.py` seeds adversarial points
   to measure `noise_rate`/`must_not_ok`; ours has no injection screen, so those
   metrics would measure a feature we do not have. Their word banks being
   disjoint from probe keywords is still the right idea if that is ever built.
-- **No distractor seeding in the first version.** Every corpus item is its own
-  target, so the harness measures *ranking*, not *discrimination under
-  near-miss competition*. Adding same-topic distractors is the obvious next
-  step and would make recall@1 far less flattering — worth doing before any
-  claim about robustness, not after.
 
 ### 3. An AST import-consistency test
 

@@ -8,6 +8,25 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Retrieval eval harness** — `scripts/retrieval_eval.py` closes the
+  "biggest evidence gap" the competitor analysis identified: retrieval
+  quality is now *measured*, not asserted. 36 target memories with one
+  paraphrased recall query each, plus 36 same-topic near-miss distractors
+  (index-paired, so a target losing to its own neighbour is reported
+  separately from losing to unrelated text), driven through the real tool
+  path (`handle_tool_call` for both seed and search — same embedding, same
+  formatting the model sees). Reported as recall@1/5/10, MRR, nDCG@5, a
+  pairwise beats-its-distractor rate, and latency. Measured on the default
+  fastembed model: recall@1 0.861, recall@5 0.972, MRR 0.921, nDCG@5 0.931,
+  beats-distractor 0.917, mean latency 7.4 ms. The undistracted first
+  version scored recall@1 0.944 — the drop is the point: the harder number
+  is the one to quote. Writes only to a scratch `hermes_memories_eval`
+  collection (production schema, dropped in `finally`, refuses to start if
+  the name equals the configured collection); `--min-recall5` turns it
+  into a regression gate (exit 1). Metrics and dataset soundness are
+  offline-unit-tested (`tests/test_retrieval_eval.py`, 10 tests) and the
+  module body imports stdlib-only, keeping the ML stack out of the fast
+  suite.
 - **`qdrant_forget` — point-targeted memory deletion.** The lifecycle gap: the
   provider could store and recall but never remove, and `qdrant_collect`
   deliberately has no destructive action. Takes exact point IDs, validates
@@ -30,6 +49,24 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Legacy in-dir state is now swept, so an upgrade cannot leave it churning
+  the venv stamp.** 0.1.5 moved `status.json` and `config.json` out of the
+  plugin directory, but an *upgraded* install kept the copies the old version
+  had written beside the module. `pm.workspace.members_stamp()` hashes every
+  file in a member dir regardless of `.gitignore`, so that inert residue still
+  changed the venv dependency stamp and re-synced dependencies on every launch
+  — and a process still running the pre-0.1.5 code could recreate the file
+  after a manual cleanup, which is exactly what happened on this box (removed
+  2026-10-01 20:34, recreated 22:33). `sweep_legacy_in_dir_state()` now unlinks
+  those two literal filenames from `Path(__file__).parent` on every
+  `initialize()` — which every store and recall passes through — making the
+  cleanup self-healing instead of a one-off. Literal names only, never globs, so
+  a real plugin input can never be matched; never raises (a read-only pip
+  install degrades to debug logging), and reports what it removed.
+- The eval harness parser now strips the point ID from `[0.72] (id) text` and
+  accepts signed scores (`[-0.02]`). Both were introduced by output changes the
+  harness predated: without them every case compared as a miss (recall would
+  have silently scored 0) and negative-score lines were dropped uncounted.
 - The docs-honesty gate no longer flags a tool-count claim inside a *released*
   CHANGELOG section. Those entries are a historical record and were true when
   written; the check is now scoped to the open section above the first

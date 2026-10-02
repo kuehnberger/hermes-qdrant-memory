@@ -2,8 +2,10 @@
 """Retrieval-quality eval harness for the Qdrant memory provider.
 
 The gap this closes: we CLAIM the provider recalls memories well; this
-measures it. Synthetic memory corpus (paraphrased recall queries, one
-unambiguous target each), driven through the REAL tool path —
+measures it. Synthetic memory corpus: paraphrased recall queries, one
+unambiguous target each, plus a same-topic near-miss distractor per case, so
+a good recall@1 means the target beat a plausible neighbour — not just
+unrelated text. Driven through the REAL tool path —
 ``handle_tool_call`` for both seeding and search, so the numbers cover
 embedding, the named-vector query, and the exact formatting the model sees.
 
@@ -128,6 +130,60 @@ CASES: list[tuple[str, str]] = [
 ]
 
 # --------------------------------------------------------------------------
+# Distractors — one per case, index-paired with CASES. Each is a same-topic
+# near miss: the right DOMAIN but the wrong fact, which is what makes recall@1
+# measure discrimination rather than "can it find the only pet fact here".
+# A distractor that is merely off-topic (cats vs. banking) would be beaten by
+# topic filtering alone and teach nothing. Each distractor shares vocabulary
+# with its paired query but does not ANSWER it — a distractor that directly
+# contradicted the target (aisle vs. window) would make the designated answer
+# arguable rather than measured. Tests assert length, index pairing, global
+# uniqueness and disjointness from every memory/query; not-answerhood is a
+# per-item design judgement, recorded here rather than pretended as a test.
+# --------------------------------------------------------------------------
+
+DISTRACTORS: list[str] = [
+    "The user drinks espresso all day and never switches to tea.",
+    "The user's neighbour's dog is a golden retriever called Biscuit.",
+    "The finance standup is on Thursday at 14:00.",
+    "The user takes ibuprofen for back pain without issues.",
+    "The user's brother Lars lives in Oslo and visits at Christmas.",
+    "The user's frequent-flyer number is stored in the travel wallet, not "
+    "the phone.",
+    "Project Osprey's deadline is 9 January; the client is Verrall Ltd.",
+    "The user's civil partnership anniversary is 22 September.",
+    "The spare office key is with the reception desk on floor 1.",
+    "The user's right shoulder was dislocated in 2019 and acts up when "
+    "swimming.",
+    "The payroll review with finance is on the last Monday of the month.",
+    "The user's favourite lakeside trail is the Fernstein loop.",
+    "The user's father Otto lives in Vienna; send cards to the Prague address.",
+    "The scanner in the studio fails if the lid is left open.",
+    "User gave up coffee in 2019 but allows one cup on difficult mornings.",
+    "The backup archive of the same data lives in us-east but is read-only.",
+    "The user's second car, a hybrid, charges to 100% overnight.",
+    "User evaluated bge-small-en but found the results noisier.",
+    "The yoga class the user attends is on Tuesdays at 18:00.",
+    "The user's ID card expired in March 2025 and needs renewing.",
+    "The user prefers pair programming for anything tricky.",
+    "The user's usual order at the station kiosk is a long black.",
+    "The user's tablet is an iPad Air kept on the stable OS channel.",
+    "The office rent to Lundby AB leaves the account on the 20th.",
+    "The user reads newsletters in an RSS reader instead of email.",
+    "The user's nephew Otto finished secondary school in June 2025.",
+    "The off-site tape rotation happens every second Friday.",
+    "The user's book club is called 'Second Chapter'.",
+    "The user's server rack stays at 18°C with the fans on low.",
+    "The Python clinic moved to 6 November, room A03.",
+    "The user's web team reviews patches in GitHub PRs, not Gerrit.",
+    "The user has no allergies but avoids peanuts after a reaction in 2017.",
+    "The weekly status report goes to the team channel every Monday.",
+    "The password vault auto-locks after 15 minutes of inactivity.",
+    "The terrarium lamp runs on a timer from 07:00 to 21:00.",
+    "The user's cycling goal is 100 km in under four hours.",
+]
+
+# --------------------------------------------------------------------------
 # Metrics — pure functions, unit-tested offline (tests/test_retrieval_eval.py).
 # rank is 1-based; None = target not in the returned window.
 # --------------------------------------------------------------------------
@@ -177,16 +233,40 @@ def percentile(values: list[float], pct: float) -> float:
 # competitor analysis).
 # --------------------------------------------------------------------------
 
-_LINE = re.compile(r"^\[([\d.]+)\] (.*)$", re.MULTILINE)
+_LINE = re.compile(r"^\[(-?[\d.]+)\] (.*)$", re.MULTILINE)
+# _tool_search prints '[0.72] (point-id) text' since qdrant_forget landed
+# (the ID is what makes a memory targetable for forgetting). _tool_recall
+# prints '[0.72] (id) text' or '(id) text' when no score exists. The ID must
+# be stripped before comparing against dataset text — comparing the raw tail
+# would make every case look like a miss and silently score recall as 0.
+_HIT_WITH_ID = re.compile(
+    r"^\[(-?[\d.]+)\] \((?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9]+)\) (.*)$",
+    re.MULTILINE,
+)
 
 
 def _parse_hits(output: str) -> list[tuple[float, str]]:
-    """Format produced by _tool_search: '[0.72] <text>' per line."""
+    """Format produced by _tool_search: '[0.72] [(id)] <text>' per line.
+
+    Scores are signed — Qdrant cosine returns negatives, and a dropped line
+    is a silently uncounted miss — so the pattern takes an optional minus.
+    """
+    matches = list(_HIT_WITH_ID.finditer(output))
+    if matches:
+        return [(float(m.group(1)), m.group(2)) for m in matches]
+    # Legacy format (pre-ID), kept so the parser works on an un-upgraded pin.
     return [(float(m.group(1)), m.group(2)) for m in _LINE.finditer(output)]
 
 
 def run(keep: bool = False) -> dict:
-    """Seed, query, score, clean up. Returns the metric report dict."""
+    """Seed targets + distractors, query, score, clean up.
+
+    Returns the metric report dict. Scoring is unchanged (rank of the target
+    among everything retrieved); the distractors raise the bar by making the
+    corpus same-topic, so a high recall@1 now means the target beat a
+    plausible neighbour, not merely that it beat unrelated text.
+    """
     tests_dir = REPO_ROOT / "tests"
     if str(tests_dir) not in sys.path:
         sys.path.insert(0, str(tests_dir))
@@ -213,10 +293,18 @@ def run(keep: bool = False) -> dict:
     ranks: list[int | None] = []
     latencies: list[float] = []
     misses: list[tuple[str, int | None]] = []
+    # Per-case confusion: did the target beat ITS OWN paired distractor?
+    # A target at rank 3 that lost to a same-topic neighbour is a different
+    # failure than one beaten by seven unrelated facts — aggregate recall
+    # cannot tell them apart, this can.
+    confusion_wins = 0
+    confusion_losses: list[str] = []
 
     try:
-        # Seed through the real tool path (embed + named-vector upsert).
-        for memory, _query in CASES:
+        # Seed through the real tool path (embed + named-vector upsert):
+        # every target AND every paired distractor.
+        for row in [*CASES, *[(d, "") for d in DISTRACTORS]]:
+            memory = row[0]
             out = provider.handle_tool_call(
                 "qdrant_upsert", {"text": memory, "session_id": "eval"}
             )
@@ -224,29 +312,57 @@ def run(keep: bool = False) -> dict:
                 raise SystemExit(f"seeding failed: {out}")
 
         # Query through the real tool path; score the exact text the model sees.
-        for memory, query in CASES:
+        # strict=True: the index pairing IS the confusion metric's axis, so a
+        # length mismatch must fail loudly rather than silently truncate.
+        for (memory, query), distractor in zip(CASES, DISTRACTORS, strict=True):
             t0 = time.perf_counter()
             out = provider.handle_tool_call(
                 "qdrant_search", {"query": query, "limit": SEARCH_LIMIT}
             )
             latencies.append((time.perf_counter() - t0) * 1000)
             hits = _parse_hits(out)
-            rank = next(
-                (i + 1 for i, (_score, text) in enumerate(hits) if text == memory),
-                None,
-            )
+            texts = [text for (_score, text) in hits]
+            rank = next((i + 1 for i, t in enumerate(texts) if t == memory), None)
             ranks.append(rank)
             if rank is None or rank > 5:
                 misses.append((query, rank))
 
+            distractor_rank = next(
+                (i + 1 for i, t in enumerate(texts) if t == distractor), None
+            )
+            # Decide from the visible window: a rank of None means "outside
+            # the top-10", which is itself informative when the other side of
+            # the pair IS visible. Only both-absent is undecidable, and it is
+            # excluded rather than counted as a win or a loss.
+            if rank is None and distractor_rank is None:
+                continue
+            # None sorts as "worse than any visible rank".
+            target_pos = rank if rank is not None else SEARCH_LIMIT + 1
+            distractor_pos = (
+                distractor_rank if distractor_rank is not None
+                else SEARCH_LIMIT + 1
+            )
+            if target_pos < distractor_pos:
+                confusion_wins += 1
+            else:
+                confusion_losses.append(query)
+
+        decidable = confusion_wins + len(confusion_losses)
         report = {
             "corpus": len(CASES),
+            "distractors": len(DISTRACTORS),
             "limit": SEARCH_LIMIT,
             "recall@1": recall_at_k(ranks, 1),
             "recall@5": recall_at_k(ranks, 5),
             "recall@10": recall_at_k(ranks, 10),
             "mrr": mrr(ranks),
             "ndcg@5": ndcg_at_k(ranks, 5),
+            # 1.0 = target always outranks its own distractor within the
+            # window; None when no case had both visible (nothing decided).
+            "beat_distractor": (
+                confusion_wins / decidable if decidable else None
+            ),
+            "confusion_losses": confusion_losses,
             "latency_mean_ms": mean(latencies),
             "latency_p95_ms": percentile(latencies, 95),
             "misses": misses[:5],
@@ -276,16 +392,24 @@ def main(argv: list[str] | None = None) -> int:
 
     report = run(keep=args.keep)
 
-    print(f"corpus: {report['corpus']} memories, one paraphrased query each")
+    print(f"corpus: {report['corpus']} targets + {report['distractors']} "
+          f"same-topic distractors, one paraphrased query per target")
     print(f"window: top-{report['limit']}  |  collection: {EVAL_COLLECTION}")
     print()
+    beat = report.get("beat_distractor")
+    beat_note = f"{beat:.3f}" if beat is not None else "n/a (no pair visible)"
     print(f"  recall@1   {report['recall@1']:.3f}")
     print(f"  recall@5   {report['recall@5']:.3f}")
     print(f"  recall@10  {report['recall@10']:.3f}")
     print(f"  MRR        {report['mrr']:.3f}")
     print(f"  nDCG@5     {report['ndcg@5']:.3f}")
+    print(f"  beats its distractor  {beat_note}")
     print(f"  latency    mean {report['latency_mean_ms']:.1f} ms, "
           f"p95 {report['latency_p95_ms']:.1f} ms")
+    if report.get("confusion_losses"):
+        print("\n  target LOST to its own distractor:")
+        for query in report["confusion_losses"]:
+            print(f"    {query}")
     if report["misses"]:
         print("\n  queries missed or ranked >5:")
         for query, rank in report["misses"]:
