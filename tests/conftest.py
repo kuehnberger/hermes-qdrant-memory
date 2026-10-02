@@ -48,7 +48,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # ---------------------------------------------------------------------------
 
 _PACKAGE = "plugins.memory.qdrant"
-_SUBMODULES = ("_backend", "_setup", "tool_schemas")
+_SUBMODULES = ("_backend", "_setup", "tool_schemas", "mdsearch", "mdsemantic")
 
 
 def _register_plugin_package() -> None:

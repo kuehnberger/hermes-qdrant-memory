@@ -8,6 +8,29 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **KNOWLEDGE INDEX — `md_search`** — search your local markdown (skills, vault,
+  docs) from any session. Lexical **first**: a SQLite FTS5 index (bm25,
+  `unicode61 remove_diacritics 2`) answers in **4–19 ms measured on this host**
+  with no model loaded and no Qdrant round-trip; only when lexical matches are
+  thin does a multilingual embedding fallback run against a **separate
+  `hermes_md_docs` collection**. Ingest is `scripts/md_ingest.py`, a standalone
+  transient script (never on the gateway's hot path), SHA-incremental, with
+  index state under `<hermes home>/state/md-search/` — not in the plugin member
+  dir, which would re-sync dependencies on every launch.
+  The docs corpus deliberately uses its **own** model
+  (`paraphrase-multilingual-MiniLM-L12-v2`) and carries **no session scope**:
+  vectors are only comparable within one model, and docs are shared while
+  memories are per-session. The memory provider's `DEFAULT_MODEL` is untouched
+  and `hermes_memories` is not re-embedded.
+  `md_search` is registered both as a provider tool and via
+  `ctx.register_tool`, so it survives a `memory.provider` switch — verified, not
+  assumed: under `kind: exclusive` the general plugin discovery *skips* this
+  plugin entirely, so the provider path alone would have taken the tool with it.
+  Gates: `tests/test_mdsearch.py` (28) plus a 14-mutation check
+  (`scripts/mutation_check_mdsearch.py`) that reverts each fix and requires its
+  gate to fail — it caught 5 gates that passed against deliberately broken source
+  on its first run.
+
 - **Retrieval eval harness** — `scripts/retrieval_eval.py` closes the
   "biggest evidence gap" the competitor analysis identified: retrieval
   quality is now *measured*, not asserted. 36 target memories with one

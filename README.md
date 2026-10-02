@@ -20,11 +20,12 @@ session.
 - **Honest availability** — `is_available()` / `check_backend()` /
   `unavailable_reason()` distinguish a bad config from a dead server, so
   `hermes memory status` can tell you which one you have.
-- **6 agent tools**: `qdrant_search`, `qdrant_upsert`, `qdrant_recall`,
+- **7 agent tools**: `qdrant_search`, `qdrant_upsert`, `qdrant_recall`,
   `qdrant_collect` (read-only), `qdrant_prepare` (reports the model's
-  dimensions and cache location before you commit to a collection), and
+  dimensions and cache location before you commit to a collection),
   `qdrant_forget` (deletes specific memories by point ID; point-targeted and
-  dry-run by default — there is no delete-all).
+  dry-run by default — there is no delete-all), and
+  `md_search` (searches your local markdown — see KNOWLEDGE INDEX below).
 - **Progress display** — optional status events during memory operations.
   When enabled, the CLI/TUI shows `💾 qdrant — stored (127,778 points)` after
   each turn and `💾 qdrant — recalled 3 memories` after each retrieval.
@@ -156,7 +157,9 @@ optional environment overrides — a local server on the default URL needs
 neither.
 
 > **There is no `hermes qdrant` CLI.** This plugin registers no CLI commands;
-> everything is reached through the six agent tools and `hermes memory status`.
+> everything is reached through the seven agent tools and `hermes memory status`.
+> (The one exception is the KNOWLEDGE INDEX ingest step below, which is a
+> standalone script, not a registered subcommand.)
 
 ## Configuration
 
@@ -205,6 +208,83 @@ reports the model's dimensions and cache location before you commit to that.
 
 If you change `vector_size` away from 384 you must also supply a matching
 embedding model; the mismatch surfaces as a write error, not a config error.
+
+## KNOWLEDGE INDEX (`md_search`)
+
+Besides memories, the plugin can index your **local markdown** — skills, vault
+and docs — and search it. `md_search` is a separate tool with a separate
+lifecycle: memories are per-session conversation, documents are shared
+reference material that changes when you edit a file.
+
+**Lexical first, always.** A query hits a SQLite FTS5 index (bm25 ranking,
+`unicode61 remove_diacritics 2`) before anything else. Measured on this host:
+**4–19 ms per query, no model loaded, no Qdrant round-trip**. Only when the
+lexical matches are thin does it fall back to a multilingual embedding search —
+so the common "where did I write X" question costs a sqlite query, while a
+concept question ("how do I stop the gateway leaking RSS") still gets an answer.
+
+The model is *not* loaded by the fast path, and that is enforced rather than
+hoped for: the lexical index lives in a module that cannot reach an embedding
+backend, and the test suite runs a query in a clean interpreter and fails if
+`fastembed`, `onnxruntime` or `sentence_transformers` appear in `sys.modules`.
+
+### Building the index
+
+Ingest is a **standalone script, run by you, as a transient process**. It is
+never on the gateway's hot path:
+
+```bash
+# lexical only — no model, no server, seconds. This is all md_search needs
+# to answer keyword queries.
+python scripts/md_ingest.py
+
+# one corpus root only (repeatable): skills | vault | docs
+python scripts/md_ingest.py --root skills
+
+# add the semantic tier (embeds every chunk; ~19k chunks ≈ 36 min one-time)
+python scripts/md_ingest.py --semantic
+
+# report without changing anything
+python scripts/md_ingest.py --status
+```
+
+Ingest is **SHA-incremental**: an unchanged file is skipped without being read
+into chunks, so re-running after a few edits costs seconds. `--prune` drops rows
+for files that no longer exist; `--rebuild` ignores the SHAs and re-chunks.
+
+Index state lives in `<hermes home>/state/md-search/index.sqlite` — deliberately
+*not* inside the plugin directory, because Hermes hashes every file in a plugin
+member dir into the workspace dependency stamp, and an index that changed on
+every ingest would re-sync dependencies on every launch.
+
+### Two collections, on purpose
+
+| collection | contents | scope |
+|---|---|---|
+| `hermes_memories` | conversation turns | `session_id` filter |
+| `hermes_md_docs` | markdown chunks | none — shared |
+
+They use **different embedding models** on purpose: memories use
+`all-MiniLM-L6-v2`, documents use
+`paraphrase-multilingual-MiniLM-L12-v2` (384-dim, and the corpus is German and
+English). Vectors are only comparable within one model, so the two collections
+must never be queried against each other — which is exactly why they are
+separate collections rather than one collection with a filter. The docs payload
+carries `{path, heading, root, sha}` and deliberately **no session scope**:
+a session filter would make the index visible only to the session that wrote it.
+
+Changing the docs model later means re-embedding the corpus, not your memories.
+
+### Known limits
+
+- **CJK lexical search is weak.** `unicode61` treats a Han/Kana run as one
+  token, so a mid-word substring will not match. The semantic tier covers it.
+- **`remove_diacritics` folds accents, it does not transliterate.** `München`
+  is findable as `munchen`, but `Grüße` is *not* findable as `grusse` (ß stays ß).
+- **The index is a cache.** Delete `index.sqlite` and re-run the ingest; nothing
+  is lost, because the `.md` files are the source of truth.
+- The tool is registered both as a memory-provider tool and as a general plugin
+  tool, so it keeps working when `memory.provider` is something else.
 
 ## Back up, restore, move
 

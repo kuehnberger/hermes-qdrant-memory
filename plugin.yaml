@@ -7,7 +7,7 @@ author: "Hermes Agent community"
 license: MIT
 homepage: "https://github.com/kuehnberger/hermes-qdrant-memory"
 tags: [memory, qdrant, vector, self-hosted]
-description: "Self-hostable Qdrant vector-memory backend for Hermes — semantic search over a local Qdrant server, session-scoped recall, no API key, no vendor account, no lock-in: a 24-42 MB Qdrant server on localhost. Registers qdrant_search / qdrant_upsert / qdrant_recall / qdrant_collect / qdrant_prepare. Embedding is local and on-device (fastembed by default, ~290 MB RSS, no torch required; sentence-transformers selectable for GPU hosts) and downloads model weights from Hugging Face on first use — all memory data stays in your Qdrant server and nothing is sent to a third party. Local embedded mode is not supported; hybrid dense+sparse RRF search and INT8 quantization are not implemented."
+description: "Self-hostable Qdrant vector-memory backend for Hermes — semantic search over a local Qdrant server, session-scoped recall, no API key, no vendor account, no lock-in: a 24-42 MB Qdrant server on localhost. Registers qdrant_search / qdrant_upsert / qdrant_recall / qdrant_collect / qdrant_prepare / qdrant_forget / md_search. Embedding is local and on-device (fastembed by default, ~290 MB RSS, no torch required; sentence-transformers selectable for GPU hosts) and downloads model weights from Hugging Face on first use — all memory data stays in your Qdrant server and nothing is sent to a third party. md_search additionally indexes local markdown (skills, vault, docs): a SQLite FTS5 lexical search answers in milliseconds without loading any model, with a multilingual embedding fallback in a separate hermes_md_docs collection when the lexical matches are thin; build the index with the bundled scripts/md_ingest.py (a standalone transient script, not a registered subcommand). Local embedded mode is not supported; hybrid dense+sparse RRF search and INT8 quantization are not implemented."
 
 requires_hermes: ">=0.21.4"       # parses under _VERSION_COMPARATOR_RE
 
@@ -38,6 +38,7 @@ provides_tools:
   - qdrant_collect
   - qdrant_prepare
   - qdrant_forget
+  - md_search
 provides_hooks: []
 
 # No config_fields: — not a manifest key; it is dropped with a warning. The schema

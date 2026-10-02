@@ -167,6 +167,51 @@ QDRANT_FORGET_SCHEMA = {
     },
 }
 
+MD_SEARCH_SCHEMA = {
+    "name": "md_search",
+    "description": (
+        "Search the local markdown corpus (skills, vault, docs) for passages that "
+        "match a query. Lexical (SQLite FTS5 + bm25) search runs first and answers "
+        "in milliseconds without loading any model; when the lexical matches are "
+        "thin, a multilingual embedding fallback runs against the hermes_md_docs "
+        "collection. Use this to find reference material you have not already been "
+        "given — not for memories, which are qdrant_search."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "What to search the markdown corpus for",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of passages to return (default 5)",
+                "default": 5,
+            },
+            "root": {
+                "type": "string",
+                "description": (
+                    "Restrict to one corpus root: 'skills', 'vault' or 'docs'. "
+                    "Omit to search all of them."
+                ),
+            },
+            "semantic": {
+                "type": "string",
+                "description": (
+                    "'auto' (default) falls back to embeddings only when lexical "
+                    "matches are thin, 'never' stays lexical-only, 'always' tries the "
+                    "semantic tier too"
+                ),
+                "enum": ["auto", "never", "always"],
+                "default": "auto",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+
 ALL_TOOL_SCHEMAS = [
     QDRANT_SEARCH_SCHEMA,
     QDRANT_UPSERT_SCHEMA,
@@ -174,4 +219,5 @@ ALL_TOOL_SCHEMAS = [
     QDRANT_COLLECT_SCHEMA,
     QDRANT_PREPARE_SCHEMA,
     QDRANT_FORGET_SCHEMA,
+    MD_SEARCH_SCHEMA,
 ]

@@ -777,6 +777,8 @@ class QdrantMemoryProvider(MemoryProvider):
             return self._tool_prepare(args)
         if tool_name == "qdrant_forget":
             return self._tool_forget(args)
+        if tool_name == "md_search":
+            return self._tool_md_search(args)
         return f"Unknown qdrant tool: {tool_name}"
 
     # -- Tool implementations ------------------------------------------------
@@ -1017,6 +1019,95 @@ class QdrantMemoryProvider(MemoryProvider):
             return f"qdrant_prepare: {e}"
         except Exception as e:
             return f"qdrant_prepare error: {type(e).__name__}: {e}"
+
+    def _tool_md_search(self, args: dict) -> str:
+        """Search the local markdown corpus: FTS5 first, embeddings only if thin.
+
+        The lexical tier is tried first and unconditionally. It is a sqlite
+        query against an index built by ``scripts/md_ingest.py``, costs no model
+        load and no Qdrant round-trip, and for a keyword-shaped question (the
+        overwhelming majority of "where did I write X") it is the correct answer
+        rather than a fallback. ``mdsemantic`` is imported INSIDE this method, and
+        only after the lexical tier came back thin — that is the mechanism by
+        which the fast path provably cannot pay the ~240 MB model load, and it is
+        what ``test_mdsearch.py::test_fts_path_does_not_import_the_model`` pins.
+        """
+        query = str(args.get("query", "") or "").strip()
+        if not query:
+            return "md_search: missing 'query' parameter"
+        limit = _clamp_limit(args.get("limit"), 5, MAX_LIMIT_SEARCH)
+        root = str(args.get("root", "") or "").strip()
+        mode = str(args.get("semantic", "auto") or "auto").strip().lower()
+
+        try:
+            from . import mdsearch
+        except ImportError:  # bare-module load mode
+            import importlib.util, os as _os
+            _spec = importlib.util.spec_from_file_location(
+                "hermes_qdrant_mdsearch",
+                _os.path.join(_os.path.dirname(__file__), "mdsearch.py"))
+            if _spec is None or _spec.loader is None:
+                return "md_search: could not load the lexical index module"
+            mdsearch = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(mdsearch)
+
+        if not mdsearch.index_is_present():
+            return (
+                "md_search: no markdown index yet. Build it with "
+                "`python scripts/md_ingest.py` (lexical only — no model needed); "
+                f"expected at {mdsearch.db_path()}."
+            )
+
+        hits = mdsearch.search_lexical(query, limit=limit, root=root)
+        lines = [f"{h.path}  [{h.heading}]" + (f"\n  {h.snippet}" if h.snippet else "")
+                 for h in hits]
+
+        # 'auto': only spend the model when the lexical tier is thin. One solid
+        # hit is usually the answer; three weak ones are usually noise.
+        semantic_note = ""
+        want_semantic = mode == "always" or (mode == "auto" and len(hits) < 2)
+        if want_semantic:
+            try:
+                from . import mdsemantic
+            except ImportError as exc:
+                mdsemantic = None
+                logger.info("md_search: semantic tier not importable — %s", exc)
+
+            semantic: list = []
+            if mdsemantic is not None:
+                try:
+                    semantic = mdsemantic.search_semantic(query, limit=limit, root=root)
+                except mdsemantic.DocsBackendUnavailable as exc:
+                    if mode == "always":
+                        return (
+                            "md_search: the semantic tier is unavailable and "
+                            f"semantic='always' forbids the lexical answer. Cause: {exc}\n"
+                            + ("\n".join(lines) if lines else "(no lexical matches either)")
+                        )
+                    # Say the tier did NOT RUN, not that it found nothing. Those
+                    # are different facts and only one of them is actionable.
+                    semantic_note = (
+                        f" (the semantic fallback did not run: {exc})"
+                    )
+                    logger.info("md_search: semantic fallback skipped — %s", exc)
+
+            seen_paths = {h.path for h in hits}
+            for hit in semantic:
+                if hit.path in seen_paths:
+                    continue
+                seen_paths.add(hit.path)
+                lines.append(
+                    f"{hit.path}  [{hit.heading}]  (semantic {hit.score:.3f})"
+                )
+
+        if not lines:
+            if want_semantic and semantic_note:
+                return f"md_search: no markdown matches for {query!r}.{semantic_note}"
+            if want_semantic:
+                return f"md_search: no markdown matches for {query!r}. The semantic tier had nothing either."
+            return f"md_search: no markdown matches for {query!r}."
+        tier = "lexical" if not want_semantic else "lexical + semantic fallback"
+        return f"md_search ({tier}, {len(lines)} result(s)):\n" + "\n".join(lines)
 
     # -- Config + Tool Schemas (ABC methods) --------------------------------
 
@@ -1563,7 +1654,78 @@ class QdrantMemoryProvider(MemoryProvider):
 # ---------------------------------------------------------------------------
 
 def register(ctx: Any) -> None:
-    """Register the QdrantMemoryProvider with Hermes."""
+    """Register the QdrantMemoryProvider with Hermes.
+
+    ``md_search`` is registered HERE as a general plugin tool, in addition to
+    appearing in the provider's ``get_tool_schemas()``. The duplication is
+    deliberate and load-bearing:
+
+    * The provider path is gated on ``memory.provider == qdrant`` AND on the
+      ``memory`` toolset being exposed (see
+      ``agent.memory_manager.inject_memory_provider_tools``).
+    * ``ctx.register_tool`` is not: under the general PluginManager it is
+      independent of the active memory provider.
+
+    Measured 2026-10-02 on this host, scratch homes, both configurations
+    (probe scripts under ``~/.hermes/profiles/qd/cache/scratch/probe_crux.py``):
+
+    ==================  =================  ================================
+    manifest ``kind``   memory.provider    ``md_search`` in tool registry
+    ==================  =================  ================================
+    ``exclusive``       ``qdrant``        yes
+    ``exclusive``       other             NO  — register() never ran
+    ``standalone``      ``qdrant``        yes
+    ``standalone``      other             yes
+    ==================  =================  ================================
+
+    With ``kind: exclusive`` the general discovery SKIPS the plugin
+    (``gate_manifest``: "exclusive plugin — activate via <category>.provider
+    config"), so ``register()`` runs only on the memory-activation path and the
+    tool dies with the provider. That is why this exists AND why an earlier
+    recommendation of mine, which claimed ``register()`` ran under general
+    discovery, was wrong — the 04:50:04 log line it was based on was the memory
+    activation path, not discovery.
+
+    Both registrations are safe: the registry is keyed by name and the second
+    registration of an identical tool is a no-op or a harmless refresh, while the
+    provider surface is a separate list appended by
+    ``inject_memory_provider_tools``.
+    """
     provider = QdrantMemoryProvider()
     ctx.register_memory_provider(provider)
     logger.info("QdrantMemoryProvider registered via ctx.register_memory_provider")
+
+    # md_search as a general tool. Guarded because register() is called from two
+    # different contexts (general discovery and the memory _ProviderCollector)
+    # and only the former has a real register_tool; a provider activated purely
+    # through memory activation must not lose the tool for that reason.
+    if hasattr(ctx, "register_tool"):
+        try:
+            ctx.register_tool(
+                name="md_search",
+                toolset="qdrant",
+                schema=_md_search_schema(),
+                handler=_md_search_handler(provider),
+                description="Search the local markdown corpus (FTS5 first, "
+                            "multilingual embedding fallback).",
+            )
+            logger.info("Plugin qdrant registered tool: md_search")
+        except Exception as exc:
+            # A secondary registration must never cost the provider itself.
+            logger.warning("Plugin qdrant failed to register md_search: %s", exc)
+
+
+def _md_search_schema() -> dict:
+    from .tool_schemas import MD_SEARCH_SCHEMA
+
+    return dict(MD_SEARCH_SCHEMA)
+
+
+def _md_search_handler(provider: "QdrantMemoryProvider"):
+    """A registry handler delegating to the provider's ``md_search`` branch."""
+
+    def _handle(args: dict | None = None, **kwargs: Any) -> str:
+        return provider.handle_tool_call("md_search", dict(args or {}))
+
+    _handle.__name__ = "md_search"
+    return _handle
