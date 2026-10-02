@@ -17,6 +17,7 @@ through stubs, so the suite stays fast and hermetic.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import subprocess
 import sys
@@ -388,10 +389,45 @@ class TestToolWiring:
         assert schema.get("name") == "md_search"
         assert "parameters" in schema, "the registered schema must carry parameters"
 
+    def test_manifest_kind_is_standalone_so_the_tool_outlives_the_provider(self):
+        """The delivery gate, as a standing rule.
+
+        Under ``kind: exclusive`` the general PluginManager skips this plugin, so
+        ``register()`` runs only on the memory-activation path and ``md_search``
+        disappears when ``memory.provider`` points elsewhere. Measured across all
+        four kind x provider combinations before this rule was written; the row
+        that justifies it is (exclusive, other provider) -> not served.
+        """
+        manifest = (REPO / "plugin.yaml").read_text(encoding="utf-8")
+        kind = re.search(r"^kind:\s*(\S+)", manifest, re.M)
+        assert kind, "plugin.yaml declares no kind"
+        assert kind.group(1) == "standalone", (
+            f"plugin.yaml kind is {kind.group(1)!r}; md_search is registered via "
+            "ctx.register_tool, which the general PluginManager only reaches for "
+            "a non-exclusive plugin — reverting to 'exclusive' silently makes the "
+            "tool provider-dependent again"
+        )
+
+    def test_memory_activation_is_not_broken_by_the_kind_flip(self):
+        """The flip must not cost the provider its activation path.
+
+        ``plugins/memory`` has its own scanner (``_is_memory_provider_dir`` looks
+        for the string "MemoryProvider" in __init__.py) and does not consult the
+        manifest ``kind`` key, so find_provider_dir still resolves this dir.
+        """
+        src = (REPO / "__init__.py").read_text(encoding="utf-8")
+        assert "class QdrantMemoryProvider" in src, (
+            "the provider class must keep its name: plugins/memory's "
+            "_is_memory_provider_dir greps __init__.py for 'MemoryProvider', so "
+            "renaming it would make the plugin undiscoverable as a provider"
+        )
+        assert "register_memory_provider" in src, (
+            "register() must still call ctx.register_memory_provider — memory "
+            "activation runs through this call, not through plugin discovery"
+        )
+
     def test_every_registered_tool_is_declared_in_the_manifest(self):
         """Declaration parity both ways — catalog rule 6."""
-        import re
-
         manifest = (REPO / "plugin.yaml").read_text(encoding="utf-8")
         block = re.search(r"^provides_tools:\n((?:[ \t]+-[ \t]+\S+\n)+)", manifest, re.M)
         declared = {ln.strip()[1:].strip() for ln in block.group(1).strip().splitlines()}

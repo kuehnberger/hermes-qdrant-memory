@@ -2,7 +2,30 @@ name: qdrant                      # MUST equal the catalog key
 version: "0.1.5"                  # quoted — structural validator requires 1-32 chars, and
                                   # the string form avoids the 0.1 -> 0.1 float trap
 manifest_version: 2               # v2 fields: python_dependencies, config_schema
-kind: exclusive                   # one active provider, selected via memory.provider
+# kind: standalone, NOT exclusive — deliberate, measured 2026-10-03.
+#
+# With `exclusive` the general PluginManager SKIPS this plugin
+# (gate_manifest: "exclusive plugin — activate via <category>.provider config"),
+# so register() runs only on the memory-activation path and md_search dies with
+# the provider. Measured across all four combinations:
+#
+#   kind        memory.provider   qdrant loaded as provider   md_search served
+#   exclusive   qdrant            yes                          yes
+#   exclusive   other             no (other provider)          NO
+#   standalone  qdrant            yes                          yes
+#   standalone  other             no (other provider)          yes   <- wanted
+#
+# `standalone` does NOT break memory activation: plugins/memory has its OWN
+# scanner (_is_memory_provider_dir looks for "MemoryProvider" in __init__.py) and
+# is independent of this key. find_provider_dir() and load_memory_provider()
+# resolve the same directory under either kind. An explicit `kind:` key is also
+# authoritative — _detect_kind_from_source only fills in a MISSING kind, so
+# flipping this is a real change and not silently undone.
+#
+# The cost, stated plainly: `plugins.enabled` must now list `qdrant` for the tool
+# to load on a profile that does not use it as its memory provider (catalog
+# install does this automatically). Memory activation itself is unaffected.
+kind: standalone
 author: "Hermes Agent community"
 license: MIT
 homepage: "https://github.com/kuehnberger/hermes-qdrant-memory"
