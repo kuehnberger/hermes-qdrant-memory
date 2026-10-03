@@ -1,6 +1,6 @@
 [project]
 name = "hermes-plugin-qdrant"
-version = "0.1.5"
+version = "0.1.7"
 description = "Self-hostable Qdrant vector-memory backend for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"

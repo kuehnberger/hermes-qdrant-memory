@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-10-03
+
+KNOWLEDGE INDEX release. This is the catalog pin target: the entry's tool count,
+its dependency claims and its rule-13 disclosures all change here, so it ships
+as one reviewed PR rather than a version bump followed by a feature PR.
+
+`0.1.6` was never published — the bump existed only on a throwaway prep clone
+and was superseded before any release cut from it, so the version numbers skip
+it deliberately rather than accidentally.
+
 ### Added
 
 - **Rule-13 disclosure: one model copy per process, and no MCP server of its
