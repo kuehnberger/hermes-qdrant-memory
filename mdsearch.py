@@ -187,10 +187,14 @@ def iter_markdown(roots: dict[str, tuple[str, set[str]]] | None = None
     for label, (base, skip) in (roots if roots is not None else DEFAULT_ROOTS).items():
         base_path = Path(base).expanduser()
         if not base_path.is_dir():
-            logger.warning("md-search root %r (%s) is not a directory; skipping", label, base)
+            logger.warning(
+                "md-search root %r (%s) is not a directory; skipping", label, base
+            )
             continue
         for dirpath, dirnames, filenames in os.walk(base_path):
-            dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
+            dirnames[:] = [
+                d for d in dirnames if d not in skip and not d.startswith(".")
+            ]
             for filename in sorted(filenames):
                 if not filename.endswith(".md"):
                     continue
@@ -350,7 +354,12 @@ def search_lexical(query: str, limit: int = 5, *, con: sqlite3.Connection | None
         params.append(max(1, int(limit)))
         rows = con.execute(sql, params).fetchall()
         return [
-            LexicalHit(path=r[0], heading=r[1], snippet=snippet(r[2], query), score=float(r[3]))
+            LexicalHit(
+                path=r[0],
+                heading=r[1],
+                snippet=snippet(r[2], query),
+                score=float(r[3]),
+            )
             for r in rows
         ]
     except sqlite3.Error as exc:
@@ -400,7 +409,9 @@ def file_row(con: sqlite3.Connection, label: str) -> tuple[str, str, int] | None
 
 def replace_file_chunks(con: sqlite3.Connection, label: str, root: str, sha: str,
                         chunks: Iterable[tuple[str, str]]) -> int:
-    """Drop any previous rows for ``label`` and insert the new chunks. Returns the count.
+    """Drop any previous rows for ``label`` and insert the new chunks.
+
+    Returns the count.
 
     Replace-by-label rather than diff: a changed file re-indexes wholesale. A
     per-chunk diff would need stable chunk identities across edits, and the win
@@ -411,7 +422,8 @@ def replace_file_chunks(con: sqlite3.Connection, label: str, root: str, sha: str
     count = 0
     for heading, content in chunks:
         cur = con.execute(
-            "INSERT INTO fts(path, heading, content) VALUES(?, ?, ?)", (label, heading, content)
+            "INSERT INTO fts(path, heading, content) VALUES(?, ?, ?)",
+            (label, heading, content),
         )
         # The SAME rowid in both tables is what lets a full rebuild regenerate
         # ftsx from fts alone (see rebuild_fts_from), so it is not optional.

@@ -77,7 +77,7 @@ def _load_embedder_module():
     try:
         from . import embedder as module
         return module
-    except ImportError:
+    except ImportError as err:
         import importlib.util
 
         spec = importlib.util.spec_from_file_location(
@@ -88,7 +88,7 @@ def _load_embedder_module():
             raise DocsBackendUnavailable(
                 f"could not load the plugin's embedder module from {__file__!r}; "
                 "the docs collection cannot embed anything without it"
-            )
+            ) from err
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
@@ -150,9 +150,15 @@ def ensure_collection(client: Any) -> None:
         pass
     client.create_collection(
         collection_name=DOCS_COLLECTION,
-        vectors_config=qmodels.VectorParams(size=DOCS_DIM, distance=qmodels.Distance.COSINE),
+        vectors_config=qmodels.VectorParams(
+            size=DOCS_DIM, distance=qmodels.Distance.COSINE
+        ),
     )
-    logger.info("md-search: created collection %s (%d-dim cosine)", DOCS_COLLECTION, DOCS_DIM)
+    logger.info(
+        "md-search: created collection %s (%d-dim cosine)",
+        DOCS_COLLECTION,
+        DOCS_DIM,
+    )
 
 
 def payload_for(label: str, heading: str, sha: str) -> dict:
@@ -219,7 +225,7 @@ def upsert_chunks(client: Any, rows: Iterable[tuple[str, str, str, str]],
     vectors = embed_texts([content for _, _, content, _ in rows], embedder=embedder)
     ordinals: dict[tuple[str, str], int] = {}
     points = []
-    for (label, heading, _content, sha), vector in zip(rows, vectors):
+    for (label, heading, _content, sha), vector in zip(rows, vectors, strict=True):
         key = (label, heading)
         ordinal = ordinals.get(key, 0)
         ordinals[key] = ordinal + 1

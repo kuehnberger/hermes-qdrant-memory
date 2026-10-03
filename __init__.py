@@ -1082,8 +1082,13 @@ class QdrantMemoryProvider(MemoryProvider):
                     if mode == "always":
                         return (
                             "md_search: the semantic tier is unavailable and "
-                            f"semantic='always' forbids the lexical answer. Cause: {exc}\n"
-                            + ("\n".join(lines) if lines else "(no lexical matches either)")
+                            f"semantic='always' forbids the lexical answer. "
+                            f"Cause: {exc}\n"
+                            + (
+                                "\n".join(lines)
+                                if lines
+                                else "(no lexical matches either)"
+                            )
                         )
                     # Say the tier did NOT RUN, not that it found nothing. Those
                     # are different facts and only one of them is actionable.
@@ -1105,7 +1110,10 @@ class QdrantMemoryProvider(MemoryProvider):
             if want_semantic and semantic_note:
                 return f"md_search: no markdown matches for {query!r}.{semantic_note}"
             if want_semantic:
-                return f"md_search: no markdown matches for {query!r}. The semantic tier had nothing either."
+                return (
+                    f"md_search: no markdown matches for {query!r}. "
+                    "The semantic tier had nothing either."
+                )
             return f"md_search: no markdown matches for {query!r}."
         tier = "lexical" if not want_semantic else "lexical + semantic fallback"
         return f"md_search ({tier}, {len(lines)} result(s)):\n" + "\n".join(lines)

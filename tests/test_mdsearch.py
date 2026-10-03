@@ -34,7 +34,9 @@ def mdsearch(tmp_path, monkeypatch):
     from plugins.memory.qdrant import mdsearch as module
 
     monkeypatch.setattr(module, "state_dir", lambda: tmp_path / "md-search")
-    monkeypatch.setattr(module, "db_path", lambda: tmp_path / "md-search" / "index.sqlite")
+    monkeypatch.setattr(
+        module, "db_path", lambda: tmp_path / "md-search" / "index.sqlite"
+    )
     yield module
     try:
         module.connect().close()
@@ -84,16 +86,20 @@ class TestFtsPathLoadsNoModel:
             "assert hits, 'lexical search returned nothing for its own seeded chunk'\n"
             "leaked = [m for m in sys.modules if m in "
             "('fastembed', 'onnxruntime', 'sentence_transformers', 'mdsemantic')]\n"
-            "assert not leaked, f'model modules imported by the lexical path: {leaked}'\n"
+            "assert not leaked, f'model modules imported by the "
+            "lexical path: {leaked}'\n"
             "print('OK')\n",
             encoding="utf-8",
         )
         env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
                "FASTEMBED_CACHE_PATH": str(tmp_path / "nowhere")}
         result = subprocess.run(
-            [sys.executable, str(probe)], capture_output=True, text=True, timeout=180, env=env
+            [sys.executable, str(probe)],
+            capture_output=True, text=True, timeout=180, env=env,
         )
-        assert result.returncode == 0, f"probe failed:\n{result.stdout}\n{result.stderr}"
+        assert result.returncode == 0, (
+            f"probe failed:\n{result.stdout}\n{result.stderr}"
+        )
         assert "OK" in result.stdout
 
     def test_fts_tokenizer_is_diacritic_insensitive(self, mdsearch):
@@ -213,7 +219,9 @@ class TestIndexBookkeeping:
         _seed(mdsearch, "skills/a.md", "H1", "first content")
         _seed(mdsearch, "skills/a.md", "H2", "second content")
         hits = mdsearch.search_lexical("first")
-        assert not hits, "stale chunks survived a re-index — the file would return dead text"
+        assert not hits, (
+            "stale chunks survived a re-index — the file would return dead text"
+        )
         assert mdsearch.search_lexical("second")
 
     def test_root_filter_narrows_results(self, mdsearch):
@@ -249,8 +257,6 @@ class TestIndexBookkeeping:
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
         try:
-            from hermes_constants import get_hermes_home
-
             monkeypatch.setattr(
                 "hermes_constants.get_hermes_home", lambda: str(tmp_path / "home")
             )
@@ -258,7 +264,10 @@ class TestIndexBookkeeping:
             pass
 
         resolved = real_module.state_dir().resolve()
-        assert real_module.REPO_DIR not in resolved.parents and resolved != real_module.REPO_DIR, (
+        assert (
+            real_module.REPO_DIR not in resolved.parents
+            and resolved != real_module.REPO_DIR
+        ), (
             f"index state would live at {resolved}, inside the plugin member dir — "
             "Hermes hashes every file there into the workspace dependency stamp"
         )
@@ -669,7 +678,8 @@ class TestToolWiring:
         plugin.register(Ctx())
         names = [n for n, _ in recorded]
         assert "md_search" in names, (
-            f"register() must call ctx.register_tool('md_search', ...); recorded {names}"
+            f"register() must call ctx.register_tool('md_search', ...); "
+            f"recorded {names}"
         )
         schema = dict(recorded)[ "md_search" ]
         assert schema.get("name") == "md_search"
@@ -715,8 +725,12 @@ class TestToolWiring:
     def test_every_registered_tool_is_declared_in_the_manifest(self):
         """Declaration parity both ways — catalog rule 6."""
         manifest = (REPO / "plugin.yaml").read_text(encoding="utf-8")
-        block = re.search(r"^provides_tools:\n((?:[ \t]+-[ \t]+\S+\n)+)", manifest, re.M)
-        declared = {ln.strip()[1:].strip() for ln in block.group(1).strip().splitlines()}
+        block = re.search(
+            r"^provides_tools:\n((?:[ \t]+-[ \t]+\S+\n)+)", manifest, re.M
+        )
+        declared = {
+            ln.strip()[1:].strip() for ln in block.group(1).strip().splitlines()
+        }
         from plugins.memory.qdrant.tool_schemas import ALL_TOOL_SCHEMAS
 
         assert declared == {s["name"] for s in ALL_TOOL_SCHEMAS}

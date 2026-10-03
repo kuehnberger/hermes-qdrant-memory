@@ -47,7 +47,10 @@ MUTATIONS = [
     (
         "swap-docs-model-to-the-memory-default",
         "mdsemantic.py",
-        '\nDOCS_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"\n',
+        (
+            '\nDOCS_MODEL = '
+            '"sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"\n'
+        ),
         '\nDOCS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"\n',
         "tests/test_mdsearch.py::TestCollectionSeparation::test_docs_model_differs_from_the_memory_default_model",
         "must differ",
@@ -56,7 +59,10 @@ MUTATIONS = [
         "add-a-session-key-to-the-docs-payload",
         "mdsemantic.py",
         '    return {\n        "path": label,\n        "heading": heading,',
-        '    return {\n        "session_id": "default",\n        "path": label,\n        "heading": heading,',
+        (
+            '    return {\n        "session_id": "default",\n'
+            '        "path": label,\n        "heading": heading,'
+        ),
         "tests/test_mdsearch.py::TestCollectionSeparation::test_docs_payload_has_no_session_scope",
         "no session scope",
     ),
@@ -95,7 +101,10 @@ MUTATIONS = [
     (
         "drop-the-md-search-dispatch-branch",
         "__init__.py",
-        '        if tool_name == "md_search":\n            return self._tool_md_search(args)\n',
+        (
+            '        if tool_name == "md_search":\n'
+            '            return self._tool_md_search(args)\n'
+        ),
         "",
         "tests/test_mdsearch.py::TestToolWiring::test_md_search_is_dispatched_by_handle_tool_call",
         "md_search",
@@ -111,7 +120,10 @@ MUTATIONS = [
     (
         "make-fts-query-raw-unquoted-sql",
         "mdsearch.py",
-        "    return \" OR \".join('\"' + t.replace('\"', '\"\"') + '\"' for t in tokens)",
+        (
+            "    return \" OR \".join("
+            "'\"' + t.replace('\"', '\"\"') + '\"' for t in tokens)"
+        ),
         "    return \" OR \".join(t for t in tokens)",
         "tests/test_mdsearch.py::TestQuerySafety::test_fts_query_quotes_operators_so_they_are_data",
         "OR",
@@ -192,7 +204,9 @@ def main() -> int:
         target = dest / relfile
         text = target.read_text(encoding="utf-8")
         if old not in text:
-            problems.append(f"{name}: MUTATION DID NOT APPLY (anchor missing in {relfile})")
+            problems.append(
+                f"{name}: MUTATION DID NOT APPLY (anchor missing in {relfile})"
+            )
             shutil.rmtree(work, ignore_errors=True)
             continue
         target.write_text(text.replace(old, new, 1), encoding="utf-8")
@@ -209,7 +223,8 @@ def main() -> int:
             problems.append(f"{name}: GATE STILL PASSED — it does not guard this")
         elif expect not in out:
             problems.append(
-                f"{name}: gate failed but not with the expected symptom (wanted {expect!r})"
+                f"{name}: gate failed but not with the expected symptom "
+                f"(wanted {expect!r})"
             )
         else:
             print(f"OK   {name}: gate failed as expected")

@@ -87,7 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     con = connect()
     try:
         if args.status:
-            files = con.execute("SELECT count(*), coalesce(sum(chunks), 0) FROM files").fetchone()
+            files = con.execute(
+                "SELECT count(*), coalesce(sum(chunks), 0) FROM files"
+            ).fetchone()
             print(f"index:    {db_path()}")
             print(f"files:    {files[0]}")
             print(f"chunks:   {files[1]}")
@@ -149,7 +151,9 @@ def main(argv: list[str] | None = None) -> int:
                         for heading, content in chunks
                     ]
                     semantic.upsert_chunks(client, rows, embedder=embedder)
-            chunks_total += replace_file_chunks(con, cf.label, cf.label.split("/", 1)[0], sha, chunks)
+            chunks_total += replace_file_chunks(
+                con, cf.label, cf.label.split("/", 1)[0], sha, chunks
+            )
             indexed += 1
             if indexed % 50 == 0:
                 con.commit()
