@@ -130,9 +130,19 @@ def main(argv: list[str] | None = None) -> int:
             sha = sha_of(cf.path)
             if not sha:
                 continue
+            # The SHA short-circuit must also know WHICH TIER wrote the file.
+            # Without this, `md_ingest.py` (lexical) followed later by
+            # `md_ingest.py --semantic` skips every file as "unchanged" and the
+            # semantic tier silently ingests NOTHING: measured 2026-10-03, 5,477
+            # FTS chunks in the index and 0 points in hermes_md_docs, reported
+            # as "79 unchanged". The two tiers are independent stores, so the
+            # recorded state carries a per-tier marker and a file is re-read
+            # whenever the tier being run this time has not seen it.
+            tier_key = "semantic_sha" if semantic is not None else "lexical_sha"
             if existing and existing[1] == sha and not args.rebuild:
-                skipped += 1
-                continue
+                if read_meta(con, tier_key + ":" + cf.label, "") == sha:
+                    skipped += 1
+                    continue
             try:
                 text = Path(cf.path).read_text(encoding="utf-8", errors="replace")
             except OSError as exc:
@@ -155,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
             chunks_total += replace_file_chunks(
                 con, cf.label, cf.label.split("/", 1)[0], sha, chunks
             )
+            write_meta(con, tier_key + ":" + cf.label, sha)
             indexed += 1
             if indexed % 50 == 0:
                 con.commit()
