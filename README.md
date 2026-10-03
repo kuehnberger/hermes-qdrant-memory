@@ -217,11 +217,18 @@ lifecycle: memories are per-session conversation, documents are shared
 reference material that changes when you edit a file.
 
 **Lexical first, always.** A query hits a SQLite FTS5 index (bm25 ranking,
-`unicode61 remove_diacritics 2`) before anything else. Measured on this host:
-**4–19 ms per query, no model loaded, no Qdrant round-trip**. Only when the
-lexical matches are thin does it fall back to a multilingual embedding search —
-so the common "where did I write X" question costs a sqlite query, while a
-concept question ("how do I stop the gateway leaking RSS") still gets an answer.
+`unicode61 remove_diacritics 2`) before anything else. No model is loaded and
+no Qdrant round-trip happens on that path. Measured on this host over a
+**57,158-chunk** index: **24–152 ms warm** (`md_search FTS5` 24 ms, a common
+single token like `the` 152 ms), up to ~1.9 s for the very first query on a cold
+sqlite cache. The cost is bm25 ranking every row the query matches, so it scales
+with how *common* the query terms are, not with the size of the answer — a
+six-word question matches ~21,000 rows and ranks them all. Timings are from
+repeated calls in one process; a single cold call reads far slower than the
+query deserves. Only when the lexical matches are thin does it fall back to a
+multilingual embedding search — so the common "where did I write X" question
+costs a sqlite query, while a concept question ("how do I stop the gateway
+leaking RSS") still gets an answer.
 
 The model is *not* loaded by the fast path, and that is enforced rather than
 hoped for: the lexical index lives in a module that cannot reach an embedding

@@ -62,13 +62,11 @@ CASES: list[tuple[str, str, list[str], str]] = [
         "qd-history",
     ),
     (
-        "word-differs-geschaeftigt",  # German: the corpus is German+English
-        "geschaeftigt",
-        [],
-        "qd-history",
-    ),
-    (
-        "diacritics",
+        # remove_diacritics 2 makes accented and unaccented spellings
+        # interchangeable, so this term must reach the skill section that
+        # documents it. The qd corpus is English, so a German-only probe would
+        # test nothing.
+        "diacritics-equivalence",
         "Grüße",
         [],
         "",
@@ -194,11 +192,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.semantic and r["semantic_added"]:
             print(f"{'':<26} sem+ {r['semantic_added']}")
 
+    # The diacritic property is an EQUIVALENCE, not a needle: both spellings
+    # must resolve to the same top hit. Asserted here rather than faked as a
+    # recall case, because "did the right words appear in the snippet window"
+    # is not what the tokenizer guarantees.
+    accented = mdsearch.search_lexical("Grüße", limit=3)
+    unaccented = mdsearch.search_lexical("grusse", limit=3)
+    diacritics_ok = bool(accented) and bool(unaccented) and (
+        accented[0].path == unaccented[0].path
+    )
+
     in_corpus = sum(1 for r in rows if r["in_corpus"])
     print("-" * 92)
     print(f"lexical recall@{args.limit}: {at1}/{n} = {at1 / n:.3f} "
           f"(Wilson 95% CI {lo:.3f}-{hi:.3f})")
     print(f"top hit from the queried corpus root: {in_corpus}/{n}")
+    print(f"diacritics equivalence (Grüße == grusse -> same top hit): "
+          f"{'ok' if diacritics_ok else 'FAILED'}")
     print(f"lexical latency: p50 {p50:.1f}ms  min {lat[0]:.1f}ms  max {lat[-1]:.1f}ms"
           if lat else "no timings")
     if args.semantic:

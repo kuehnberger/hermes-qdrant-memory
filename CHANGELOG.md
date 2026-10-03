@@ -10,13 +10,14 @@ All notable changes to this project are documented here. The format is based on
 
 - **KNOWLEDGE INDEX — `md_search`** — search your local markdown (skills, vault,
   docs) from any session. Lexical **first**: a SQLite FTS5 index (bm25,
-  `unicode61 remove_diacritics 2`) answers in **4–19 ms measured on this host**
-  with no model loaded and no Qdrant round-trip; only when lexical matches are
-  thin does a multilingual embedding fallback run against a **separate
-  `hermes_md_docs` collection**. Ingest is `scripts/md_ingest.py`, a standalone
-  transient script (never on the gateway's hot path), SHA-incremental, with
-  index state under `<hermes home>/state/md-search/` — not in the plugin member
-  dir, which would re-sync dependencies on every launch.
+  `unicode61 remove_diacritics 2`) answers with no model loaded and no Qdrant
+  round-trip — **24–152 ms warm on this host over 57,158 chunks**, scaling with
+  how common the query terms are (bm25 ranks every matched row); only when
+  lexical matches are thin does a multilingual embedding fallback run against a
+  **separate `hermes_md_docs` collection**. Ingest is `scripts/md_ingest.py`, a
+  standalone transient script (never on the gateway's hot path), SHA-incremental,
+  with index state under `<hermes home>/state/md-search/` — not in the plugin
+  member dir, which would re-sync dependencies on every launch.
   The docs corpus deliberately uses its **own** model
   (`paraphrase-multilingual-MiniLM-L12-v2`) and carries **no session scope**:
   vectors are only comparable within one model, and docs are shared while
