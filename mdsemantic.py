@@ -34,7 +34,8 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from typing import Any, Iterable, NamedTuple
+from collections.abc import Iterable
+from typing import Any, NamedTuple
 
 logger = logging.getLogger("hermes.plugins.memory.qdrant.mdsearch_semantic")
 
@@ -46,8 +47,8 @@ DOCS_COLLECTION = "hermes_md_docs"
 DOCS_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 DOCS_DIM = 384
 
-#: The point id is derived from (path, heading) so re-ingesting the same chunk
-#: overwrites in place instead of accumulating duplicates.
+#: Namespace for the point id. ``uuid5`` (SHA-1 based) rather than uuid4 so the
+#: id is DERIVED — see :func:`chunk_point_id`.
 _ID_NAMESPACE = uuid.NAMESPACE_URL
 
 
@@ -170,6 +171,31 @@ def payload_for(label: str, heading: str, sha: str) -> dict:
     }
 
 
+def chunk_point_id(label: str, heading: str, ordinal: int) -> str:
+    """The deterministic id of one chunk point.
+
+    ``(path, heading)`` alone is NOT unique. Real corpus, measured on the
+    2026-10-03 index: 51,670 FTS chunks but only 47,459 distinct
+    ``(path, heading)`` pairs — 4,211 chunks (8.1%) across 801 files collided on
+    one id, last write won, and the losers stayed queryable in FTS5 while being
+    invisible to the vector tier. ``references/llms-full.md`` alone collapsed
+    423 chunks.
+
+    The ordinal is the chunk's occurrence count *within* that (path, heading)
+    pair, so duplicates coexist and the id stays a pure function of position —
+    re-ingesting an unchanged file rewrites exactly the ids it already owns
+    instead of accumulating copies.
+
+    Deliberately NOT keyed on the file ``sha``: a content-dependent id turns
+    every edit into "delete the old ids, write new ones" for a caller that
+    upserts without deleting, i.e. a second stale copy of every point. Section
+    *removals* are handled where they belong — ``md_ingest`` deletes the file's
+    points before writing a changed one (delete-before-write) — so the id only
+    has to be collision-free and stable.
+    """
+    return str(uuid.uuid5(_ID_NAMESPACE, f"{label}\x00{heading}\x00{ordinal}"))
+
+
 def upsert_chunks(client: Any, rows: Iterable[tuple[str, str, str, str]],
                   embedder: Any | None = None) -> int:
     """Embed and write ``(label, heading, content, sha)`` rows.
@@ -177,6 +203,12 @@ def upsert_chunks(client: Any, rows: Iterable[tuple[str, str, str, str]],
     The payload is :func:`payload_for` — ``{path, heading, root, sha}`` and
     deliberately NO ``session_id``: these are shared documents, and a session
     filter here would make the index visible only to the session that wrote it.
+
+    Ids come from :func:`chunk_point_id`, so two chunks sharing a heading path
+    get two points. This function does NOT clear points a caller no longer
+    wants: an upsert overwrites ids that still exist and leaves the rest, and
+    removing deleted sections is the caller's job (``md_ingest`` does it with
+    :func:`delete_file_points` before this call).
     """
     from qdrant_client.http import models as qmodels
 
@@ -185,20 +217,29 @@ def upsert_chunks(client: Any, rows: Iterable[tuple[str, str, str, str]],
     if not rows:
         return 0
     vectors = embed_texts([content for _, _, content, _ in rows], embedder=embedder)
-    points = [
-        qmodels.PointStruct(
-            id=str(uuid.uuid5(_ID_NAMESPACE, f"{label}\x00{heading}")),
+    ordinals: dict[tuple[str, str], int] = {}
+    points = []
+    for (label, heading, _content, sha), vector in zip(rows, vectors):
+        key = (label, heading)
+        ordinal = ordinals.get(key, 0)
+        ordinals[key] = ordinal + 1
+        points.append(qmodels.PointStruct(
+            id=chunk_point_id(label, heading, ordinal),
             vector=vector,
             payload=payload_for(label, heading, sha),
-        )
-        for (label, heading, _content, sha), vector in zip(rows, vectors)
-    ]
+        ))
     client.upsert(collection_name=DOCS_COLLECTION, points=points, wait=True)
     return len(points)
 
 
 def delete_file_points(client: Any, label: str) -> None:
-    """Remove every chunk point belonging to one file label."""
+    """Remove every chunk point belonging to one file label.
+
+    The delete-before-write half of incremental ingest: an upsert only
+    overwrites ids that still exist, so a section removed from a file would
+    otherwise keep its point (and its old ``sha``) forever. The filter is on the
+    payload's ``path``, which :func:`payload_for` writes on every point.
+    """
     from qdrant_client.http import models as qmodels
 
     client.delete(

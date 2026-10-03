@@ -241,7 +241,7 @@ python scripts/md_ingest.py
 # one corpus root only (repeatable): skills | vault | docs
 python scripts/md_ingest.py --root skills
 
-# add the semantic tier (embeds every chunk; ~19k chunks ≈ 36 min one-time)
+# add the semantic tier (embeds every chunk; ~52k chunks ≈ 65 min one-time)
 python scripts/md_ingest.py --semantic
 
 # report without changing anything

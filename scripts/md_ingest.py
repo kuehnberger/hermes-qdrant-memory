@@ -4,11 +4,17 @@
 This runs as a TRANSIENT process — a one-shot CLI invocation that loads the
 embedding model, does its work and exits. It is never on the gateway's hot path,
 and nothing in the provider's live path shells out to it: a full corpus ingest
-is ~19k chunks (~36 min at the measured 9 chunks/s on 5 cores), which no agent
-turn may pay for.
+is ~52k chunks (measured 51,670 over 2,678 files on 2026-10-03) ≈ 65 min at the
+measured 10-14 chunks/s on 5 cores, which no agent turn may pay for.
 
 Ingest is SHA-incremental: a file whose bytes are unchanged is skipped without
-being read into chunks. Deleted files have their index rows removed.
+being read into chunks. A file whose bytes CHANGED has both tiers rewritten —
+lexically by ``replace_file_chunks`` (drop-and-insert per file) and, with
+``--semantic``, by deleting that file's points BEFORE embedding the new ones
+(delete-before-write): an upsert only overwrites ids that still exist, so a
+section deleted from the file would otherwise keep its old point forever.
+Deleted files have their index rows removed by ``--prune``, which with
+``--semantic`` also removes their points.
 
 Usage:
     python scripts/md_ingest.py                 # lexical only (fast, no model)
@@ -36,8 +42,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mdsearch import (  # noqa: E402
-    connect,
     chunk_text,
+    connect,
     db_path,
     drop_file,
     file_row,
@@ -70,7 +76,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--status", action="store_true",
                     help="print index statistics and exit without changing anything")
     ap.add_argument("--prune", action="store_true",
-                    help="drop index rows for files that no longer exist")
+                    help="drop index rows for files that no longer exist "
+                         "(and their points, when --semantic is given)")
     args = ap.parse_args(argv)
 
     if not db_path().is_file():
@@ -129,15 +136,21 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"skip {cf.label}: {exc}", file=sys.stderr)
                 continue
             chunks = chunk_text(text, cf.label)
+            if semantic is not None:
+                # delete-before-write. `upsert_chunks` only overwrites ids that
+                # still exist, so a section this edit REMOVED would keep its
+                # point (with the old sha) forever without this call. Doing it
+                # unconditionally — not only when `chunks` is non-empty — is
+                # what lets a file that became empty shed its points too.
+                semantic.delete_file_points(client, cf.label)
+                if chunks:
+                    rows = [
+                        (cf.label, heading, content, sha)
+                        for heading, content in chunks
+                    ]
+                    semantic.upsert_chunks(client, rows, embedder=embedder)
             chunks_total += replace_file_chunks(con, cf.label, cf.label.split("/", 1)[0], sha, chunks)
             indexed += 1
-            if semantic is not None and chunks:
-                root = cf.label.split("/", 1)[0]
-                semantic.upsert_chunks(
-                    client,
-                    [(cf.label, heading, content, sha) for heading, content in chunks],
-                    embedder=embedder,
-                )
             if indexed % 50 == 0:
                 con.commit()
                 print(f"  ... {indexed} indexed, {skipped} unchanged "
@@ -147,6 +160,12 @@ def main(argv: list[str] | None = None) -> int:
             for label in sorted(labels_in_index(con) - seen):
                 drop_file(con, label)
                 removed += 1
+                # Lexical-only runs never open a Qdrant client (a dead server
+                # must not block a prune), but a run that OWNS the semantic
+                # tier has to clear it too — otherwise a deleted file keeps
+                # serving vector hits for text that no longer exists.
+                if semantic is not None:
+                    semantic.delete_file_points(client, label)
 
         write_meta(con, "last_ingest", time.strftime("%Y-%m-%d %H:%M:%S"))
         if semantic is not None:

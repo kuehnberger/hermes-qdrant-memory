@@ -141,6 +141,44 @@ MUTATIONS = [
         "tests/test_mdsearch.py::TestFtsPathLoadsNoModel::test_mdsearch_module_does_not_import_the_semantic_tier",
         "must not import",
     ),
+    # --- the two defects this card exists to fix, plus their two neighbours ---
+    # Anchors are the assignments/calls themselves: the id scheme is discussed
+    # at length in the docstring directly above it, and a mutation that only
+    # edited prose would leave every gate green.
+    (
+        "collapse-duplicate-heading-ids",
+        "mdsemantic.py",
+        "    return str(uuid.uuid5(_ID_NAMESPACE, "
+        'f"{label}\\x00{heading}\\x00{ordinal}"))',
+        '    return str(uuid.uuid5(_ID_NAMESPACE, f"{label}\\x00{heading}"))',
+        "tests/test_mdsearch.py::TestSemanticTierConsistency::test_duplicate_heading_chains_yield_two_points",
+        "still sharing one point id",
+    ),
+    (
+        "regenerate-point-ids-on-every-run",
+        "mdsemantic.py",
+        "    return str(uuid.uuid5(_ID_NAMESPACE, "
+        'f"{label}\\x00{heading}\\x00{ordinal}"))',
+        "    return str(uuid.uuid4())",
+        "tests/test_mdsearch.py::TestSemanticTierConsistency::test_rebuilding_an_unchanged_file_keeps_the_same_point_ids",
+        "point ids changed when the bytes did not",
+    ),
+    (
+        "skip-delete-before-write-on-a-changed-file",
+        "scripts/md_ingest.py",
+        "                semantic.delete_file_points(client, cf.label)",
+        "                pass  # mutation: no delete-before-write",
+        "tests/test_mdsearch.py::TestSemanticTierConsistency::test_removing_a_section_leaves_no_point_with_the_old_sha",
+        "delete-before-write is missing",
+    ),
+    (
+        "prune-clears-fts-but-not-the-vector-points",
+        "scripts/md_ingest.py",
+        "                    semantic.delete_file_points(client, label)",
+        "                    pass  # mutation: prune spares the vector tier",
+        "tests/test_mdsearch.py::TestSemanticTierConsistency::test_pruning_a_deleted_file_removes_its_points",
+        "left the vector points",
+    ),
 ]
 
 

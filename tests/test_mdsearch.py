@@ -177,6 +177,36 @@ class TestChunking:
         chunks = mdsearch.chunk_text("# Only\n\n## Headings\n", "skills/empty.md")
         assert len(chunks) == 1
 
+    def test_no_chunk_is_ever_empty_including_frontmatter_only_files(self, mdsearch):
+        """An empty chunk is what killed the first semantic ingest run.
+
+        The real corpus has ~20 ``skills/<category>/DESCRIPTION.md`` files that
+        are a YAML block and nothing else. Stripping the frontmatter left an
+        empty fallback string, which the embedder rejects outright
+        (``cannot embed empty or non-string text``) and which FTS5 matches
+        nothing against. The invariant is checked on every degenerate shape,
+        not on the one file that happened to crash.
+        """
+        cases = {
+            "skills/x/DESCRIPTION.md": "---\ndescription: Only prose lives here.\n---",
+            "skills/x/fm_no_trailing_nl.md": "---\ndescription: Second prose.\n---\n",
+            "skills/empty.md": "",
+            "skills/whitespace.md": "   \n\t\n",
+            "skills/headings.md": "# Only\n\n## Headings\n",
+        }
+        for label, text in cases.items():
+            chunks = mdsearch.chunk_text(text, label)
+            assert chunks, f"{label}: produced no chunk at all"
+            for heading, content in chunks:
+                assert isinstance(content, str) and content.strip(), (
+                    f"{label}: empty chunk under heading {heading!r} — "
+                    "the embedder raises on this and FTS can never match it"
+                )
+        # frontmatter-only files keep their prose: it is the only text they have
+        _, content = mdsearch.chunk_text(
+            cases["skills/x/DESCRIPTION.md"], "skills/x/DESCRIPTION.md")[0]
+        assert "Only prose lives here." in content, content
+
 
 class TestIndexBookkeeping:
     def test_replace_removes_the_previous_rows_for_that_file(self, mdsearch):
@@ -330,6 +360,262 @@ class TestIngestCli:
         )
         assert result.returncode == 2
         assert "known:" in result.stderr
+
+
+class _FakeEmbedder:
+    """Docs-model stand-in: a deterministic vector, no weights, no network.
+
+    Keeps fastembed's contract that an empty/non-string chunk is an ERROR —
+    the failure that killed the first ingest run must not be papered over by a
+    fake that happily embeds anything.
+    """
+
+    def encode(self, text: str) -> list[float]:
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"cannot embed empty or non-string text: {text!r}")
+        return [float(len(text)), float(sum(map(ord, text)) % 997), 1.0]
+
+
+class _FakeDocsClient:
+    """The slice of ``QdrantClient`` ``mdsemantic`` uses, backed by a dict.
+
+    It EVALUATES the delete filter instead of merely recording that
+    ``delete()`` was called: a call-recorder passes the stale-point gate even
+    when the filter matches nothing, and "the removed section is still there"
+    is exactly the symptom under test.
+    """
+
+    def __init__(self) -> None:
+        self.points: dict[str, dict] = {}
+        self._collections: set[str] = set()
+
+    def get_collection(self, name: str):
+        if name not in self._collections:
+            raise RuntimeError(f"collection {name!r} does not exist")
+        from types import SimpleNamespace
+
+        return SimpleNamespace(points_count=len(self.points))
+
+    def create_collection(self, collection_name: str, vectors_config=None, **kwargs):
+        self._collections.add(collection_name)
+
+    def upsert(self, *, collection_name: str, points, wait: bool = False) -> None:
+        for point in points:
+            self.points[str(point.id)] = {
+                "payload": dict(point.payload or {}),
+                "vector": point.vector,
+            }
+
+    def delete(
+        self, *, collection_name: str, points_selector, wait: bool = False
+    ) -> None:
+        must = list(getattr(points_selector.filter, "must", None) or [])
+        doomed = [
+            pid
+            for pid, record in self.points.items()
+            if all(
+                record["payload"].get(cond.key) == getattr(cond.match, "value", None)
+                for cond in must
+            )
+        ]
+        for pid in doomed:
+            del self.points[pid]
+
+    def close(self) -> None:
+        pass
+
+    def payloads(self, path: str) -> list[dict]:
+        """Payloads of every point written for one file label."""
+        return [
+            record["payload"]
+            for record in self.points.values()
+            if record["payload"].get("path") == path
+        ]
+
+
+@pytest.fixture
+def ingest(tmp_path, monkeypatch):
+    """``md_ingest.main()`` against a tmp corpus, tmp index and a fake Qdrant.
+
+    The script is EXECUTED rather than imported as a library: its module-level
+    ``sys.path.insert`` + ``from mdsearch import ...`` is the load path production
+    uses, and it binds the BARE top-level modules — so those bare instances are
+    what has to be patched (the dotted ``plugins.memory.qdrant.*`` copies the
+    rest of the suite uses are different module objects).
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "md_ingest_under_test", REPO / "scripts" / "md_ingest.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    import mdsearch as script_mdsearch
+
+    monkeypatch.setattr(script_mdsearch, "state_dir", lambda: tmp_path / "md-search")
+    monkeypatch.setattr(
+        script_mdsearch, "db_path", lambda: tmp_path / "md-search" / "index.sqlite"
+    )
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    monkeypatch.setattr(
+        script_mdsearch, "DEFAULT_ROOTS", {"skills": (str(corpus), set())}
+    )
+    monkeypatch.setattr(module, "db_path", script_mdsearch.db_path)
+
+    store = _FakeDocsClient()
+
+    import mdsemantic as script_mdsemantic
+
+    monkeypatch.setattr(script_mdsemantic, "make_embedder", _FakeEmbedder)
+
+    import qdrant_client
+
+    monkeypatch.setattr(qdrant_client, "QdrantClient", lambda **kwargs: store)
+
+    class IngestEnv:
+        def __init__(self) -> None:
+            self.store = store
+            self.corpus = corpus
+            self.index = tmp_path / "md-search" / "index.sqlite"
+
+        def write(self, name: str, text: str) -> Path:
+            path = self.corpus / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            return path
+
+        def run(self, *args: str) -> None:
+            rc = module.main(["--semantic", "--root", "skills", *args])
+            assert rc == 0, f"md_ingest.main exited {rc}"
+
+        def _rows(self, sql: str, params: tuple = ()) -> list:
+            con = sqlite3.connect(str(self.index))
+            try:
+                return con.execute(sql, params).fetchall()
+            finally:
+                con.close()
+
+        def fts_rows(self, label: str) -> list:
+            return self._rows(
+                "SELECT heading, content FROM fts WHERE path = ?", (label,)
+            )
+
+        def all_fts_rows(self) -> list:
+            return self._rows("SELECT path, heading, content FROM fts")
+
+    return IngestEnv()
+
+
+class TestSemanticTierConsistency:
+    """The two defects the 2026-10-03 ingest run found, fixed here.
+
+    Both are invisible to any lexical check — they live entirely on the Qdrant
+    side, which is why they shipped: ``count(fts)`` was green while 8.1% of
+    chunks were missing from the vector tier. So every gate below drives the
+    REAL ``md_ingest.main()`` end to end and inspects the resulting store
+    against the FTS rows, rather than asserting on either tier alone.
+    """
+
+    def test_duplicate_heading_chains_yield_two_points(self, ingest):
+        """``(path, heading)`` is not a unique key — 801 files prove it.
+
+        Two sections in one file can carry the same heading path. They shared
+        one point id, so the last write won and the other chunk silently
+        vanished from the vector tier while staying queryable in FTS5: 4,211
+        chunks (8.1%) on the real corpus.
+        """
+        label = "skills/dup.md"
+        ingest.write(
+            "dup.md",
+            "# Top\n\n## Setup\n\nfirst body\n\n## Other\n\nmiddle\n\n"
+            "## Setup\n\nsecond body\n",
+        )
+        ingest.run()
+
+        rows = ingest.fts_rows(label)
+        headings = [h for h, _ in rows]
+        assert headings.count("Top > Setup") == 2, (
+            f"the fixture must contain a duplicate heading chain or this gate "
+            f"proves nothing; got {headings}"
+        )
+        stored = ingest.store.payloads(label)
+        assert len(stored) == len(rows), (
+            f"the vector tier holds {len(stored)} point(s) for {len(rows)} "
+            "FTS chunks — duplicate heading chains are still sharing one "
+            "point id"
+        )
+
+    def test_removing_a_section_leaves_no_point_with_the_old_sha(self, ingest):
+        """Delete-before-write: an upsert cannot remove what it no longer has.
+
+        ``upsert_chunks`` overwrites ids that still exist and leaves the rest,
+        so without a delete of the file's points first, every section removed
+        by an edit keeps serving hits (with the old ``sha``) forever.
+        """
+        label = "skills/edit.md"
+        ingest.write(
+            "edit.md",
+            "# One\n\nalpha\n\n## Two\n\nbeta\n\n## Three\n\ngamma\n",
+        )
+        ingest.run()
+        before = ingest.store.payloads(label)
+        assert len(before) == 3, before
+        old_shas = {p["sha"] for p in before}
+        assert len(old_shas) == 1, old_shas
+
+        # Remove section "Three" — the file's sha changes, so this takes the
+        # incremental path (no --rebuild), which is the path that regressed.
+        ingest.write("edit.md", "# One\n\nalpha\n\n## Two\n\nbeta\n")
+        ingest.run()
+
+        stale = [p for p in ingest.store.payloads(label) if p["sha"] in old_shas]
+        assert not stale, (
+            f"{len(stale)} point(s) still carry sha {sorted(old_shas)[0][:12]}… "
+            "after the section was removed — delete-before-write is missing, "
+            "so dead text keeps serving vector hits"
+        )
+        after = ingest.store.payloads(label)
+        assert len(after) == len(ingest.fts_rows(label)) == 2, after
+
+    def test_pruning_a_deleted_file_removes_its_points(self, ingest):
+        """``--prune`` used to clear FTS only; the vector tier is unverified."""
+        label = "skills/gone.md"
+        ingest.write("gone.md", "# Gone\n\nvanishing text\n")
+        ingest.run()
+        assert ingest.store.payloads(label), "fixture produced no points"
+
+        (ingest.corpus / "gone.md").unlink()
+        ingest.run("--prune")
+
+        assert not ingest.fts_rows(label), "prune left the FTS rows behind"
+        assert not ingest.store.payloads(label), (
+            "--prune dropped the FTS rows but left the vector points: a "
+            "deleted file would keep serving semantic hits"
+        )
+
+    def test_rebuilding_an_unchanged_file_keeps_the_same_point_ids(self, ingest):
+        """Ids must be DERIVED, not regenerated: same bytes -> same ids.
+
+        Asserted on the id set rather than the count, because delete-before-write
+        makes the count look right even for random ids — churn shows up as every
+        point being rewritten (and re-indexed) on each run.
+        """
+        ingest.write("stable.md", "# A\n\none body\n\n## B\n\ntwo body\n")
+        ingest.run()
+        before = set(ingest.store.points)
+        assert before, "fixture produced no points"
+
+        ingest.run("--rebuild")
+
+        assert set(ingest.store.points) == before, (
+            "point ids changed when the bytes did not — ids must be a pure "
+            "function of the chunk's position, not regenerated per run"
+        )
+        assert len(ingest.store.points) == len(
+            ingest.all_fts_rows()
+        ), "a rebuild must leave one point per FTS chunk"
 
 
 class TestToolWiring:
