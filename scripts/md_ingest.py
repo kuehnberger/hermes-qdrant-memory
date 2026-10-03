@@ -99,11 +99,12 @@ def main(argv: list[str] | None = None) -> int:
 
         roots = None
         if args.root:
-            from mdsearch import DEFAULT_ROOTS
-            roots = {k: v for k, v in DEFAULT_ROOTS.items() if k in set(args.root)}
+            from mdsearch import configured_roots
+            known = configured_roots()
+            roots = {k: v for k, v in known.items() if k in set(args.root)}
             if not roots:
                 print(f"no such root(s): {', '.join(args.root)}; known: "
-                      f"{', '.join(DEFAULT_ROOTS)}", file=sys.stderr)
+                      f"{', '.join(known)}", file=sys.stderr)
                 return 2
 
         semantic = _load_semantic() if args.semantic else None

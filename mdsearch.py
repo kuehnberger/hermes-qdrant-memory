@@ -47,8 +47,9 @@ logger = logging.getLogger("hermes.plugins.memory.qdrant.mdsearch")
 # Corpus configuration
 # ---------------------------------------------------------------------------
 
-#: Default corpus roots. Overridable via the ``md_docs_roots`` config key; each
-#: entry is ``(root path, set of directory names never descended into)``.
+#: Default corpus roots. Overridable via the ``md_docs_roots`` config key (see
+#: :func:`configured_roots`) — each entry is ``(root path, set of directory
+#: names never descended into)``.
 DEFAULT_ROOTS: dict[str, tuple[str, set[str]]] = {
     "skills": (
         str(Path.home() / ".hermes" / "skills"),
@@ -175,6 +176,77 @@ def write_meta(con: sqlite3.Connection, key: str, value: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _qdrant_json() -> dict[str, Any]:
+    """The provider's runtime config dict (``<HERMES_HOME>/qdrant.json``).
+
+    Read defensively: the knowledge index must not be taken down by a malformed
+    or absent config file, and it must never import the provider module (that
+    would drag the whole memory plugin — and its Qdrant client — onto the
+    FTS5 fast path, which is exactly what this module must never do).
+    """
+    import json
+
+    try:
+        from hermes_constants import get_hermes_home
+
+        home = Path(get_hermes_home())
+        if home.parent.name == "profiles":
+            home = home.parent.parent
+    except Exception:
+        env = os.environ.get("HERMES_HOME", "").strip()
+        home = Path(env) if env else Path.home() / ".hermes"
+    path = home / "qdrant.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def configured_roots() -> dict[str, tuple[str, set[str]]]:
+    """The effective corpus roots: :data:`DEFAULT_ROOTS` + ``md_docs_roots``.
+
+    The ``md_docs_roots`` config key (in ``qdrant.json``) maps a root LABEL to a
+    path, and is merged OVER the defaults::
+
+        {"md_docs_roots": {"skills": "/home/me/.hermes/profiles/qd/skills",
+                           "sessions": "/home/me/knowledge/qd-sessions"}}
+
+    A label given here replaces that label's default path while KEEPING its
+    skip set, so an override can widen a corpus without having to restate which
+    directories to avoid. A label absent from :data:`DEFAULT_ROOTS` gets the
+    default skip set (dot-directories are skipped regardless — see
+    :func:`iter_markdown`). Non-string paths and non-dict values are ignored
+    with a warning rather than raising: a typo in a config file must not make
+    ``md_search`` raise.
+    """
+    roots = dict(DEFAULT_ROOTS)
+    configured = _qdrant_json().get("md_docs_roots")
+    if not isinstance(configured, dict):
+        if configured is not None:
+            logger.warning(
+                "md-search: ignoring md_docs_roots of type %s (want an object "
+                "of label -> path)",
+                type(configured).__name__,
+            )
+        return roots
+    for label, base in configured.items():
+        if not isinstance(label, str) or not isinstance(base, str):
+            logger.warning(
+                "md-search: ignoring md_docs_roots entry %r=%r (want string "
+                "label and string path)",
+                label,
+                base,
+            )
+            continue
+        path = base.strip()
+        if not path:
+            logger.warning("md-search: ignoring empty md_docs_roots path for %r", label)
+            continue
+        roots[label] = (os.path.expanduser(path), roots.get(label, (None, set()))[1])
+    return roots
+
+
 def iter_markdown(roots: dict[str, tuple[str, set[str]]] | None = None
                   ) -> Iterator[CorpusFile]:
     """Yield every ``.md`` file under the configured roots.
@@ -184,7 +256,8 @@ def iter_markdown(roots: dict[str, tuple[str, set[str]]] | None = None
     exclusions for, which is how a ``.venv`` of vendored readmes silently
     doubles the corpus.
     """
-    for label, (base, skip) in (roots if roots is not None else DEFAULT_ROOTS).items():
+    effective = roots if roots is not None else configured_roots()
+    for label, (base, skip) in effective.items():
         base_path = Path(base).expanduser()
         if not base_path.is_dir():
             logger.warning(

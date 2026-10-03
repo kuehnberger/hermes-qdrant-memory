@@ -257,6 +257,14 @@ Index state lives in `<hermes home>/state/md-search/index.sqlite` — deliberate
 member dir into the workspace dependency stamp, and an index that changed on
 every ingest would re-sync dependencies on every launch.
 
+**Run the ingest from a shell, not through a profile's agent session.** Inside
+the agent every profile shares the one index under the base Hermes home; a
+script run with a profile `HERMES_HOME` exported resolves to
+`<profile>/state/md-search/` instead and builds an index the agent will never
+read. So `unset HERMES_HOME` first (or point it at the base home), then check
+with `python scripts/md_ingest.py --status` — the `index:` line it prints is the
+one the tool will use.
+
 ### Two collections, on purpose
 
 | collection | contents | scope |
