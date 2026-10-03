@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Rule-13 disclosure: one model copy per process, and no MCP server of its
+  own** — the README now states plainly that the embedding model is loaded
+  **in-process, once per Hermes process** (the plugin registers native tools;
+  it is not a server), with the measured cost: 5 concurrent processes →
+  **1,071 MB resident total, ≈194–197 MB marginal per extra process**
+  (`fastembed`/MiniLM-L6-v2, 384 dims, load + 20 embeds each; 0.9 s for one,
+  2.9 s for five). This is the same shape as an MCP server configured over
+  **stdio**, where the protocol yields one server process per client, and the
+  README says so explicitly. It also states the other half: the plugin starts
+  **no MCP server, no sidecar and no background process**, and anyone wrapping
+  it as an MCP server should use one shared HTTP endpoint rather than a
+  per-client stdio `command:`/`args:` entry.
+
 - **KNOWLEDGE INDEX — `md_search`** — search your local markdown (skills, vault,
   docs) from any session. Lexical **first**: a SQLite FTS5 index (bm25,
   `unicode61 remove_diacritics 2`) answers with no model loaded and no Qdrant

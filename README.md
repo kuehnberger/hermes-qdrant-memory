@@ -209,6 +209,38 @@ reports the model's dimensions and cache location before you commit to that.
 If you change `vector_size` away from 384 you must also supply a matching
 embedding model; the mismatch surfaces as a write error, not a config error.
 
+### Disclosure: one model copy per process, and no MCP server of its own
+
+Two things a user should know before installing, in the spirit of catalog
+rule 13:
+
+**The embedding model is loaded in-process, once per process.** The plugin
+registers native Hermes tools; it is not a server, so the model weights are
+`mmap`-ed into whatever process is doing the embedding — each Hermes gateway,
+dashboard, CLI session and cron worker pays for its own copy. Measured on this
+host with the default `fastembed` backend (MiniLM-L6-v2, 384 dims), 5 concurrent
+processes each loading the model and embedding 20 texts:
+
+| | 1 process | 5 concurrent processes |
+|---|---|---|
+| RSS after first embed | 211 MB | 211–216 MB each |
+| total resident | 211 MB | **1,071 MB** (≈194–197 MB marginal per extra process) |
+| wall time (load + 20 embeds) | 0.9 s | 2.9 s |
+
+This is the same shape as an MCP server configured over **stdio**, where the
+protocol gives you one server process per client. It is not fixable by
+configuration on our side, and we deliberately do not hide it behind a
+"lightweight" claim: the honest lever is how many Hermes processes you run
+against this provider. Memory *data* is shared (one Qdrant collection); the
+*model* is not.
+
+**The plugin starts no MCP server, no sidecar, and no background process.**
+It registers tools in-process and talks to your Qdrant server over REST. If
+you build something that exposes this plugin to other agents as an MCP server,
+prefer a **single shared HTTP server** over a per-client stdio entry — a stdio
+`command:`/`args:` config spawns one process (plus its own ~200 MB model copy)
+per client, which is the most common way this cost gets multiplied by accident.
+
 ## KNOWLEDGE INDEX (`md_search`)
 
 Besides memories, the plugin can index your **local markdown** — skills, vault
