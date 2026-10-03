@@ -37,8 +37,9 @@ import logging
 import os
 import re
 import sqlite3
+from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Any, Iterable, Iterator, NamedTuple
+from typing import Any, NamedTuple
 
 logger = logging.getLogger("hermes.plugins.memory.qdrant.mdsearch")
 
@@ -237,6 +238,7 @@ def chunk_text(text: str, fallback_label: str) -> list[tuple[str, str]]:
     A section longer than ``MAX_CHUNK_CHARS`` is split on blank lines and
     packed greedily, so a chunk stays a run of whole paragraphs.
     """
+    raw = text
     text = _FRONTMATTER.sub("", text, count=1)
     sections: list[tuple[str, str]] = []
     stack: dict[int, str] = {}
@@ -275,7 +277,14 @@ def chunk_text(text: str, fallback_label: str) -> list[tuple[str, str]]:
     # A file of nothing but frontmatter/headings still deserves one entry, or
     # it would be in `files` but unfindable — and "indexed but unreachable"
     # is exactly the kind of quiet hole this gate culture exists to prevent.
-    return out or [(fallback_label, text.strip()[:MAX_CHUNK_CHARS])]
+    #
+    # The fallback content is the RAW text, frontmatter included: a file whose
+    # entire substance is its YAML block (skills' `DESCRIPTION.md` — 20 of
+    # them) strips to an empty string, which the embedder rejects outright and
+    # which FTS5 matches nothing against. The frontmatter description is the
+    # only prose such a file has, so keeping it is both non-empty and useful.
+    fallback = (raw or "").strip()[:MAX_CHUNK_CHARS]
+    return out or [(fallback_label, fallback or fallback_label)]
 
 
 # ---------------------------------------------------------------------------

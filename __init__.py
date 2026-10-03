@@ -1042,7 +1042,8 @@ class QdrantMemoryProvider(MemoryProvider):
         try:
             from . import mdsearch
         except ImportError:  # bare-module load mode
-            import importlib.util, os as _os
+            import importlib.util
+            import os as _os
             _spec = importlib.util.spec_from_file_location(
                 "hermes_qdrant_mdsearch",
                 _os.path.join(_os.path.dirname(__file__), "mdsearch.py"))
@@ -1721,7 +1722,7 @@ def _md_search_schema() -> dict:
     return dict(MD_SEARCH_SCHEMA)
 
 
-def _md_search_handler(provider: "QdrantMemoryProvider"):
+def _md_search_handler(provider: QdrantMemoryProvider):
     """A registry handler delegating to the provider's ``md_search`` branch."""
 
     def _handle(args: dict | None = None, **kwargs: Any) -> str:
