@@ -21,7 +21,10 @@ from pathlib import Path
 
 import pytest
 
-import mdsearch
+try:  # the package-relative import the CI matrix uses
+    from plugins.memory.qdrant import mdsearch
+except ImportError:  # bare-top-level load mode (running from the plugin dir)
+    import mdsearch
 
 
 def _write_config(monkeypatch, tmp_path: Path, payload) -> None:
