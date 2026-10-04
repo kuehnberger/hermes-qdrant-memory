@@ -462,7 +462,7 @@ that a provider has a real `unavailable_reason()` and a real `check_backend()`;
 a plugin whose availability check only looks at files on disk will report
 healthy against a server that is not there.
 
-**What we have less of.** We ship 6 tools and no CLI, no lifecycle hooks and
+**What we have less of.** We ship 7 tools and no CLI, no lifecycle hooks and
 no screenshots, and we do not have a hosted option or a summarization pass.
 Some peers are larger and offer more surface. We prefer fewer moving parts,
 and `docs/competitor-analysis-entropicmem.md` records in detail which

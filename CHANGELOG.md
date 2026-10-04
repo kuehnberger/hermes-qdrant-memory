@@ -6,6 +6,36 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **README contradicted its own tool count, and the docs-honesty gate could
+  not see it.** The comparison section claimed a stale count of 6 while the
+  tool list near the top of the same file correctly said 7 — the phrasing that
+  had drifted had no word "agent" in it, and
+  `scripts/check_docs_honesty.py`'s count pattern required that word, so the
+  gate stayed green on a self-inconsistent README. The count claim is fixed to
+  7 and the pattern now matches a bare `<quantity> [qualifier] tools`, so the
+  phrasing can no longer hide.
+- **The peer-analysis scale table's "Ours" column was stale in six of eight
+  rows** and nothing measured it: Tools said 5 (really 7), `__init__.py` 1,449
+  (1,740), Python lines 3,064 (3,763), tests 134 (209 functions / 218
+  collected), and it still claimed "three no-op stubs" for hooks that were
+  deleted in cc5ee7d. All rows re-measured from the tree, and a new gate
+  section (§1b) re-measures every one of them on each run, so the table cannot
+  drift again silently. It also flags a hook **implemented in code but absent
+  from `provides_hooks`** — the rule-6 mismatch in the direction the validator
+  cannot see.
+
+Both changes are mutation-checked by
+`scripts/mutation_check_docs_gate_toolcount.sh` (6 plants, each required to
+fail with its own symptom; the first version of that script proved two of its
+own restorations were no-ops, which is why it now re-extracts a pristine tree
+per mutant instead of undoing in place). The widened count pattern is also the
+second false-positive source this gate has had: an early version ended its
+alternation with `\w+`, matched the word "the" in "through the seven agent
+tools", and reported a correct README as unparseable. Numbers are computed,
+never frozen — a frozen figure is a figure that rots.
+
 ## [0.1.7] — 2026-10-03
 
 KNOWLEDGE INDEX release. This is the catalog pin target: the entry's tool count,

@@ -93,11 +93,34 @@ else:
             )
 
     # every prose claim of a COUNT must equal len(tools)
+    #
+    # The word "agent" in this pattern is what let README:465 ("We ship 6
+    # tools") through: the phrasing that drifted had no "agent", so the
+    # pattern never matched it and the gate stayed green on a README that
+    # contradicted itself two hundred lines from its own correct claim. A
+    # count claim is a count claim — match the bare "<n> tools" form too, with
+    # an optional intervening qualifier, and let the existing prose carve-outs
+    # (changelog history, "five tools" spelled out) do the rest.
+    # The alternation must be QUANTITY TOKENS ONLY. An earlier version ended it
+    # with `|\w+`, and that silently broke the whole check: on "through the
+    # seven agent tools" it matched group(1)="the" and let the qualifier group
+    # swallow "seven agent", so a correct README produced three bogus
+    # "unparseable tool count" alarms while the real defect it was written for
+    # still slipped past. The lesson is the shape of this section, not the
+    # count: a pattern loose enough to match English prose is a pattern whose
+    # capture group you no longer control. Match a quantity, an optional
+    # qualifier, then "tools" — and let anything that is not a quantity simply
+    # not match.
     count_pat = re.compile(
-        r"\b(\w+|\d+|five|four|six|seven|eight|nine)\s+agent tools\b", re.I
+        r"\b(\d+|zero|no|none|one|two|three|four|five|six|seven|eight|nine|ten"
+        r"|eleven|twelve)\s+((?:[a-z][a-z-]*\s+){0,3}?)tools\b",
+        re.I,
     )
     words = {
-        "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+        "zero": 0, "no": 0, "none": 0,
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+        "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+        "twelve": 12,
     }
     for rel in PROSE_FILES:
         text = read(rel)
@@ -137,6 +160,114 @@ else:
         for t in set(re.findall(r"`(qdrant_\w+)`", read(rel))):
             if t not in tools:
                 problems.append(f"{rel}: references unknown tool `{t}`")
+
+    # --- 1b. The peer-analysis table's "Ours" column is re-measured -----------
+    #
+    # `docs/competitor-analysis-entropicmem.md` carries a scale table whose
+    # "Ours" column is a pile of counts that were correct on 2026-10-02 and
+    # silently stopped being true: Tools said 5, `__init__.py` said 1,449, the
+    # test count said 134. Nothing flagged it, because the §1 count pattern
+    # only reads "<n> agent tools" in prose and this table is pipe-delimited.
+    #
+    # So each row is re-measured from the tree and the cell must contain the
+    # real figure. Measured, never frozen: the numbers are recomputed on every
+    # run, so the table cannot drift without the gate noticing.
+    peer_doc = "docs/competitor-analysis-entropicmem.md"
+    peer_text = read(peer_doc)
+
+    def _py_lines(exclude_prefixes: tuple[str, ...]) -> int:
+        """Sum physical lines of plugin .py files outside `exclude_prefixes`."""
+        total = 0
+        for py in sorted(REPO.rglob("*.py")):
+            relp = py.relative_to(REPO).as_posix()
+            if "__pycache__" in relp or relp.startswith(exclude_prefixes):
+                continue
+            total += len(py.read_text(encoding="utf-8").splitlines())
+        return total
+
+    init_lines = len((REPO / "__init__.py").read_text(encoding="utf-8").splitlines())
+
+    # Parse `provides_hooks:` as a YAML-ish block list, stopping at the first
+    # line that is not a list item. Slicing to end-of-file (the obvious first
+    # cut) would let a stray "- x" further down the manifest be counted as a
+    # hook, so the terminator matters.
+    manifest_text = read("plugin.yaml")
+    hooks_declared = 0
+    if "provides_hooks:" in manifest_text:
+        block = manifest_text.split("provides_hooks:", 1)[1].splitlines()
+        for ln in block:
+            if not ln.strip() or ln.lstrip().startswith("#"):
+                continue
+            if not ln.lstrip().startswith("-"):
+                break
+            hooks_declared += 1
+    # A hook the loader cannot see is the rule-6 mismatch in reverse, so count
+    # what the CODE implements, not just what the manifest declares.
+    hooks_impl = len(
+        re.findall(
+            r"^\s*def (?:pre|post)_setup|^\s*def on_\w+\(",
+            read("__init__.py"),
+            re.M,
+        )
+    )
+    cli_commands = len(re.findall(r"add_parser\(", read("__init__.py")))
+    # "Screenshots" means evidence of the tool WORKING, not any image in the
+    # repo. `docs/banner.jpg` is a README banner asset and was the first thing
+    # this check flagged: counting it would have made the gate demand that the
+    # peer table admit to screenshots the project does not ship. Exclude
+    # banner/OG assets by name, and say so in the table cell rather than
+    # quietly widening the definition later.
+    banner_names = {"banner.jpg", "banner.png", "og.png", "og.jpg"}
+    screenshots = len(
+        [
+            p
+            for p in REPO.glob("docs/**/*")
+            if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+            and p.name.lower() not in banner_names
+        ]
+    )
+    test_funcs = sum(
+        len(re.findall(r"^\s*def test_", p.read_text(encoding="utf-8"), re.M))
+        for p in sorted(REPO.glob("tests/*.py"))
+    )
+
+    measured: dict[str, list[str]] = {
+        "python lines": [f"{_py_lines(('tests/', 'scripts/')):,}"],
+        "`__init__.py`": [f"{init_lines:,}"],
+        "tools": [str(len(tools))],
+        "hooks": [str(hooks_declared)],
+        "cli commands": [str(cli_commands)],
+        "screenshots": [str(screenshots)],
+        "tests": [f"{test_funcs:,}"],
+    }
+    print(
+        "peer-table 'Ours' column re-measured: "
+        + ", ".join(f"{k}={v[0]}" for k, v in measured.items())
+        + f" (hooks also implemented in code: {hooks_impl})"
+    )
+    if hooks_declared != hooks_impl:
+        problems.append(
+            f"{peer_doc}: Hooks row says {hooks_declared} but __init__.py "
+            f"implements {hooks_impl} — an implemented-but-undeclared hook is "
+            "the same rule-6 mismatch as a declared-but-absent one"
+        )
+
+    if peer_text:
+        for line in peer_text.splitlines():
+            if not line.strip().startswith("|") or "---" in line:
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) != 3:
+                continue
+            key, ours = cells[0].lower(), cells[2]
+            if key in {"", "entropicmem", "ours"} or ours in {"", "—", "-", "n/a"}:
+                continue
+            for expected in measured.get(key, []):
+                if expected not in ours:
+                    problems.append(
+                        f"{peer_doc}: '{cells[0]}' row claims {ours!r} for "
+                        f"'Ours', measured {expected}"
+                    )
 
 
 # --- 2. hermes memory subcommands -------------------------------------------
