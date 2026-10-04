@@ -175,12 +175,25 @@ else:
     peer_doc = "docs/competitor-analysis-entropicmem.md"
     peer_text = read(peer_doc)
 
+    # CI runs `uv sync`, which creates `.venv/` INSIDE the checkout — ~3.5M
+    # lines of site-packages. A bare rglob counted those as plugin source and
+    # the gate failed in CI with "measured 3,595,681" while passing locally,
+    # where no .venv exists. A measurement whose value depends on untracked
+    # build artifacts is not a measurement of the source, so every dotted
+    # directory (and .venv by name, in case it is ever un-dotted) is skipped.
+    # This is the same defect class the plugin skill records for
+    # members_stamp(): hashing files that are not inputs.
+    skip_dirs = {".venv", "venv", "__pycache__", ".git", ".ruff_cache", ".pytest_cache"}
+
     def _py_lines(exclude_prefixes: tuple[str, ...]) -> int:
         """Sum physical lines of plugin .py files outside `exclude_prefixes`."""
         total = 0
         for py in sorted(REPO.rglob("*.py")):
             relp = py.relative_to(REPO).as_posix()
-            if "__pycache__" in relp or relp.startswith(exclude_prefixes):
+            parts = relp.split("/")
+            if any(p in skip_dirs or p.startswith(".") for p in parts):
+                continue
+            if relp.startswith(exclude_prefixes):
                 continue
             total += len(py.read_text(encoding="utf-8").splitlines())
         return total

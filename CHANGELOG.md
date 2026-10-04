@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **CI caught a bug in the fix below, on its first run.** The new peer-table
+  re-measurement walked the tree with `rglob`, and CI's `uv sync` leaves a
+  `.venv/` inside the checkout — so it counted ~3.5M lines of site-packages as
+  plugin source and failed with `measured 3,595,681` while passing on every
+  developer machine, where no `.venv` exists. Dotted directories are now skipped
+  and the CI shape is a standing case in the mutation check: a measurement that
+  moves when an untracked build artifact appears is not a measurement. The
+  lesson is the familiar one — a check exercised only in one environment has
+  not been exercised.
 - **README contradicted its own tool count, and the docs-honesty gate could
   not see it.** The comparison section claimed a stale count of 6 while the
   tool list near the top of the same file correctly said 7 — the phrasing that
@@ -27,14 +36,15 @@ All notable changes to this project are documented here. The format is based on
   cannot see.
 
 Both changes are mutation-checked by
-`scripts/mutation_check_docs_gate_toolcount.sh` (6 plants, each required to
-fail with its own symptom; the first version of that script proved two of its
-own restorations were no-ops, which is why it now re-extracts a pristine tree
-per mutant instead of undoing in place). The widened count pattern is also the
-second false-positive source this gate has had: an early version ended its
-alternation with `\w+`, matched the word "the" in "through the seven agent
-tools", and reported a correct README as unparseable. Numbers are computed,
-never frozen — a frozen figure is a figure that rots.
+`scripts/mutation_check_docs_gate_toolcount.sh` (6 plants plus the CI shape,
+each required to fail — or, for the .venv case, to stay clean — with its own
+symptom; the first version of that script proved two of its own restorations
+were no-ops, which is why it now re-extracts a pristine tree per mutant instead
+of undoing in place). The widened count pattern is also the second
+false-positive source this gate has had: an early version ended its alternation
+with `\w+`, matched the word "the" in "through the seven agent tools", and
+reported a correct README as unparseable. Numbers are computed, never frozen —
+a frozen figure is a figure that rots.
 
 ## [0.1.7] — 2026-10-03
 

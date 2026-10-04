@@ -114,6 +114,30 @@ run_mutant F "row claims" \
   "sed -i 's/| 3,763 (plugin/| 3,700 (plugin/' docs/competitor-analysis-entropicmem.md" \
   || status=1
 
+# G: the CI shape — `uv sync` leaves a .venv/ inside the checkout. Counting it
+# as plugin source is what broke the first version of §1b in CI (measured
+# 3,595,681) while passing locally, where no .venv exists. Plant one and the
+# gate must still be clean: a measurement that moves when an untracked build
+# artifact appears is not a measurement.
+echo "=== MUTANT G: untracked .venv inside the checkout must not move the count ==="
+reset_tree
+mkdir -p "$WORK/repo/.venv/lib/python3.13/site-packages/fake"
+for i in $(seq 1 200); do
+  printf 'x = 1\n' > "$WORK/repo/.venv/lib/python3.13/site-packages/fake/mod$i.py"
+done
+g_out="$(run_gate)"; g_rc=$?
+echo "$g_out" | grep -E 'peer-table|FAIL' | head -3
+if [ "$g_rc" -ne 0 ]; then
+  echo "!!! MUTANT G: gate failed with a .venv present — LOC count still"
+  echo "    includes build artifacts; this is exactly the CI failure."
+  status=1
+elif ! echo "$g_out" | grep -q 'python lines=3,763'; then
+  echo "!!! MUTANT G: count moved (expected python lines=3,763)"
+  status=1
+else
+  echo "--- G passed: .venv ignored, count unmoved (rc=0)"
+fi
+
 echo
 echo "=== RESTORED (fresh pristine copy must be clean) ==="
 reset_tree
@@ -129,7 +153,7 @@ fi
 
 echo
 if [ "$status" -eq 0 ]; then
-  echo "=== ALL MUTATIONS CAUGHT (6/6) + restoration verified ==="
+  echo "=== ALL MUTATIONS CAUGHT (6 plants + 1 CI-shape) + restoration verified ==="
 else
   echo "=== MUTATION CHECK FAILED ==="
 fi
