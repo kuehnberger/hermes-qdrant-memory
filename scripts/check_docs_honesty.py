@@ -175,25 +175,69 @@ else:
     peer_doc = "docs/competitor-analysis-entropicmem.md"
     peer_text = read(peer_doc)
 
-    # CI runs `uv sync`, which creates `.venv/` INSIDE the checkout — ~3.5M
-    # lines of site-packages. A bare rglob counted those as plugin source and
-    # the gate failed in CI with "measured 3,595,681" while passing locally,
-    # where no .venv exists. A measurement whose value depends on untracked
-    # build artifacts is not a measurement of the source, so every dotted
-    # directory (and .venv by name, in case it is ever un-dotted) is skipped.
-    # This is the same defect class the plugin skill records for
-    # members_stamp(): hashing files that are not inputs.
+    # Two CI artifacts sit inside the checkout and neither is plugin source: the
+    # `.venv/` that `uv sync` creates, and `hermes-core/`, the sparse checkout
+    # the workflow places in the same workspace so this gate can read
+    # hermes_cli/subcommands. Counting either broke §1b twice in CI — measured
+    # 3,595,681 (the venv), then 263,421 (the core checkout) — while every
+    # local run passed, because a developer tree has neither.
+    #
+    # The rule is the general one, and it is a definition rather than a block
+    # list: plugin source is the set of git-TRACKED files, so enumerate that.
+    # `git ls-files` is the only list that already excludes build artifacts,
+    # nested clones and scratch dirs without this gate having to know their
+    # names — and it keeps working when CI renames a path. Falling back to
+    # rglob (with dotted dirs and nested checkouts skipped) keeps the gate
+    # usable in a plain tarball copy, where there is no .git at all.
     skip_dirs = {".venv", "venv", "__pycache__", ".git", ".ruff_cache", ".pytest_cache"}
+
+    def _is_nested_checkout(relp: str) -> bool:
+        """True for a file inside a top-level dir that is its own checkout."""
+        if "/" not in relp:
+            return False
+        return (REPO / relp.split("/", 1)[0] / ".git").exists()
+
+    def _source_files() -> list[str]:
+        """Plugin-source .py paths: git-tracked where possible, else a scan."""
+        import subprocess
+
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(REPO), "ls-files", "*.py"],
+                capture_output=True, text=True, timeout=60,
+            )
+            tracked = [
+                ln.strip()
+                for ln in r.stdout.splitlines()
+                if ln.strip() and r.returncode == 0
+            ]
+            if tracked:
+                return sorted(tracked)
+            print(
+                "NOTE — `git ls-files` returned nothing; falling back to a "
+                "directory scan. Counts may include untracked files."
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"NOTE — git ls-files unavailable ({exc}); scanning instead.")
+        return sorted(
+            py.relative_to(REPO).as_posix()
+            for py in REPO.rglob("*.py")
+            if not any(
+                p in skip_dirs or p.startswith(".")
+                for p in py.relative_to(REPO).parts
+            )
+        )
 
     def _py_lines(exclude_prefixes: tuple[str, ...]) -> int:
         """Sum physical lines of plugin .py files outside `exclude_prefixes`."""
         total = 0
-        for py in sorted(REPO.rglob("*.py")):
-            relp = py.relative_to(REPO).as_posix()
-            parts = relp.split("/")
-            if any(p in skip_dirs or p.startswith(".") for p in parts):
+        for relp in _source_files():
+            if _is_nested_checkout(relp):
                 continue
             if relp.startswith(exclude_prefixes):
+                continue
+            py = REPO / relp
+            if not py.is_file():
                 continue
             total += len(py.read_text(encoding="utf-8").splitlines())
         return total

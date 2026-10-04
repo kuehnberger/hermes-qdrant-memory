@@ -8,15 +8,20 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
-- **CI caught a bug in the fix below, on its first run.** The new peer-table
-  re-measurement walked the tree with `rglob`, and CI's `uv sync` leaves a
-  `.venv/` inside the checkout — so it counted ~3.5M lines of site-packages as
-  plugin source and failed with `measured 3,595,681` while passing on every
-  developer machine, where no `.venv` exists. Dotted directories are now skipped
-  and the CI shape is a standing case in the mutation check: a measurement that
-  moves when an untracked build artifact appears is not a measurement. The
-  lesson is the familiar one — a check exercised only in one environment has
-  not been exercised.
+- **CI caught a bug in the fix below, on its first run — twice.** The new
+  peer-table re-measurement walked the tree with `rglob`, so it counted
+  everything that happens to sit inside the checkout as plugin source: first
+  `.venv/` (~3.5M lines of site-packages, created by `uv sync`), then — after
+  dotted directories were skipped — the `hermes-core/` sparse checkout the
+  workflow places in the same workspace (`measured 263,421`). Both failures were
+  invisible locally, because a developer tree has neither artifact. Plugin
+  source is now *defined* as the git-tracked file set (`git ls-files`, with a
+  printed-scan fallback where there is no `.git`), so the gate no longer needs
+  to know the names of build artifacts or nested clones, and keeps working if
+  CI renames a path. The full CI workspace shape is a standing case in the
+  mutation check. The lesson is the familiar one — a check exercised only in
+  one environment has not been exercised, and a gate written to block-list
+  artifacts is one rename away from being wrong again.
 - **README contradicted its own tool count, and the docs-honesty gate could
   not see it.** The comparison section claimed a stale count of 6 while the
   tool list near the top of the same file correctly said 7 — the phrasing that

@@ -114,28 +114,45 @@ run_mutant F "row claims" \
   "sed -i 's/| 3,763 (plugin/| 3,700 (plugin/' docs/competitor-analysis-entropicmem.md" \
   || status=1
 
-# G: the CI shape — `uv sync` leaves a .venv/ inside the checkout. Counting it
-# as plugin source is what broke the first version of §1b in CI (measured
-# 3,595,681) while passing locally, where no .venv exists. Plant one and the
-# gate must still be clean: a measurement that moves when an untracked build
+# G: the CI shape — `uv sync` leaves a .venv/ inside the checkout AND the
+# workflow sparse-checks the hermes core out to `hermes-core/` in the same
+# workspace. Counting either as plugin source is what broke §1b twice in CI
+# (measured 3,595,681, then 263,421) while every local run passed. Plant BOTH
+# and the gate must still be clean: a measurement that moves when an untracked
 # artifact appears is not a measurement.
-echo "=== MUTANT G: untracked .venv inside the checkout must not move the count ==="
+echo "=== MUTANT G: CI workspace shape (.venv + nested core checkout) ==="
 reset_tree
-mkdir -p "$WORK/repo/.venv/lib/python3.13/site-packages/fake"
+mkdir -p "$WORK/repo/.venv/lib/python3.13/site-packages/fake" \
+         "$WORK/repo/hermes-core/hermes_cli/subcommands"
+# A nested clone is skipped by SHAPE (has its own .git), so this must be a real
+# one — and deliberately named something CI would not use, to prove the rule is
+# not keyed on the literal "hermes-core".
+git init -q "$WORK/repo/third-party-core"
+mkdir -p "$WORK/repo/third-party-core/hermes_cli/subcommands"
+cp "$CORE/hermes_cli/subcommands/memory.py" \
+   "$WORK/repo/third-party-core/hermes_cli/subcommands/memory.py" 2>/dev/null
+# actions/checkout gives hermes-core/ its own .git too — so make it a real
+# checkout here, or the test is not reproducing CI.
+git init -q "$WORK/repo/hermes-core"
 for i in $(seq 1 200); do
   printf 'x = 1\n' > "$WORK/repo/.venv/lib/python3.13/site-packages/fake/mod$i.py"
+done
+for i in $(seq 1 300); do
+  printf 'z = 3\n' > "$WORK/repo/hermes-core/hermes_cli/subcommands/m$i.py"
+  printf 'z = 3\n' > "$WORK/repo/third-party-core/hermes_cli/subcommands/m$i.py"
 done
 g_out="$(run_gate)"; g_rc=$?
 echo "$g_out" | grep -E 'peer-table|FAIL' | head -3
 if [ "$g_rc" -ne 0 ]; then
-  echo "!!! MUTANT G: gate failed with a .venv present — LOC count still"
-  echo "    includes build artifacts; this is exactly the CI failure."
+  echo "!!! MUTANT G: gate failed in the CI workspace shape — the LOC count"
+  echo "    still includes build artifacts or a nested checkout. This is"
+  echo "    exactly the failure CI reported twice."
   status=1
 elif ! echo "$g_out" | grep -q 'python lines=3,763'; then
   echo "!!! MUTANT G: count moved (expected python lines=3,763)"
   status=1
 else
-  echo "--- G passed: .venv ignored, count unmoved (rc=0)"
+  echo "--- G passed: .venv and nested clone both ignored, count unmoved (rc=0)"
 fi
 
 echo
