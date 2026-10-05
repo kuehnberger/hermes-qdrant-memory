@@ -1,17 +1,22 @@
 # Documentation
 
-Placeholder for the documentation that will live in this directory. The Hermes
-plugin catalog renders `README.md` at the pinned SHA, so the README stays the
-primary document; anything here is supplementary.
+Supplementary documentation for the Qdrant memory provider. The Hermes plugin
+catalog renders `README.md` at the pinned SHA, so the repo README stays the
+primary document; everything here is supporting material.
 
-## Planned
+## Contents
 
 | Path | Purpose |
 |------|---------|
-| `docs/banner.jpg` | 2400×1200 (2:1) catalog banner, referenced by the catalog entry's `image:` field |
-| `docs/screenshots/*.png` | Up to 6 GitHub-hosted screenshots, pinned to the release commit |
-| `docs/architecture.md` | How the provider, the backend wrapper and the session-scoped payload filter fit together |
-| `docs/hybrid-search.md` | Design notes for the unwired dense+sparse RRF path in `_backend.py` |
+| `DEV.md` | The technical reference — architecture, embedder backends, the markdown knowledge index, backups, the eval harness, disclosures, and what is deliberately not implemented. |
+| `banner.jpg` | 2400×1200 (2:1) catalog banner, referenced by the catalog entry's `image:` field |
+| `screenshots/*.png` | GitHub-hosted screenshots, pinned to the release commit |
+| `competitor-analysis-entropicmem.md` | A comparison against a peer memory provider, kept for design provenance |
+
+Architecture and hybrid-search design notes live in `DEV.md` rather than in
+separate files: the unwired dense+sparse RRF path and INT8 quantization are
+described there under "Not implemented", which is the only place a reader needs
+to see them until they are wired in.
 
 ## Banner credit
 
@@ -33,7 +38,7 @@ painting of the goddess of memory, by a painter who was also an engraver, in a
 Neoclassical register that suits an agent's tool rather than its marketing.
 
 The crop trims 7.2% of the source height. The card CSS
-(`object-fit: cover`, `aspect-ratio: 2/1`) centre-cropps any image that is not
+(`object-fit: cover`, `aspect-ratio: 2/1`) centre-crops any image that is not
 2:1, so shipping an exact 2:1 file means the page never loses more than the
 vignette we chose.
 

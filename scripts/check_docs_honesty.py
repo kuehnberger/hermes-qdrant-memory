@@ -36,6 +36,7 @@ PROSE_FILES = [
     "CONTRIBUTING.md",
     "CHANGELOG.md",
     "docs/README.md",
+    "docs/DEV.md",
     "docs/screenshots/README.md",
     "docs/competitor-analysis-entropicmem.md",
 ]
