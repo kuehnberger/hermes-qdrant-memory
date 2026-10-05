@@ -173,11 +173,40 @@ neither.
 | `embedder` | select | `fastembed` | `fastembed` (default, no torch) or `sentence-transformers` (GPU, needs torch) |
 | `model` | string | `sentence-transformers/all-MiniLM-L6-v2` | must match the backend's catalog; changing it changes vector space |
 | `device` | select | `cpu` | `auto`, `cpu` — `cuda` requires the `sentence-transformers` backend |
+| `display.level` | select | `off` | `off`, `summary`, `verbose` — a **nested** key, see below |
 
 Resolution order, lowest to highest: built-in defaults → `config.yaml`'s
 `memory.qdrant` → `<HERMES_HOME>/qdrant.json` → `QDRANT_URL` / `QDRANT_API_KEY`
 from the environment. Secrets are read through Hermes' scoped-secret path and
 are never written into `config.yaml`.
+
+### Display levels
+
+`display.level` is a **nested** key of the same `<HERMES_HOME>/qdrant.json`
+that holds `md_docs_roots`, which is why the table above lists it dotted
+rather than as a flat knob:
+
+```json
+{ "display": { "level": "summary" } }
+```
+
+| level | what the user sees |
+|---|---|
+| `off` (default) | nothing new — the indicator is byte-identical to 0.1.7 |
+| `summary` | the chat indicator gains latency and collection: 📖 qdrant · 41ms · hermes_memories — recalled 10 memories |
+| `verbose` | the `summary` label **plus** one numeric line per recall, per store and per `md_search` in `agent.log` |
+
+The default is `off`, so an existing install — including a catalog install —
+behaves exactly as before until someone writes that key. The verbose lines
+carry numbers and identifiers only (latency, counts, score range, session id,
+collection, file labels), never recalled message text or search-result
+snippets. When no timing exists yet — the first turn, or a recall that failed
+— the `· …ms` segment is omitted rather than printed as a zero.
+
+The file is read defensively, like `md_docs_roots`: absent means `off`, and a
+malformed file, a wrong-typed `display` block or a value outside
+`off|summary|verbose` degrades to `off` with a single warning line instead of
+an error. `hermes memory status` reports the effective level under `display`.
 
 ## Embeddings
 

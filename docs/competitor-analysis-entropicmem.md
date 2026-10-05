@@ -22,11 +22,11 @@ definition of each cell. Re-measured at `cbef6ad`.
 
 | | EntropicMem | Ours |
 |---|---|---|
-| Python lines | 13,604 (plugin) / ~32,500 (repo) | 3,763 (plugin, excl. tests and scripts) |
-| `__init__.py` | 1,693 | 1,740 |
+| Python lines | 13,604 (plugin) / ~32,500 (repo) | 4,040 (plugin, excl. tests and scripts) |
+| `__init__.py` | 1,693 | 2,017 |
 | Tools | 7 | 7 |
 | Hooks | 5 | 0 (the three no-op stubs were deleted 2026-09-29, cc5ee7d) |
-| Tests | 895 | 209 test functions / 218 collected (3,993 lines of test code) |
+| Tests | 895 | 241 test functions / 258 collected (4,535 lines of test code) |
 | CLI commands | 34 | 0 |
 | Screenshots | 5 | 0 (`docs/screenshots/README.md` is a capture plan, not shots) |
 | Eval harness | `evals/` with datasets + baselines | `scripts/retrieval_eval.py` (36 targets + 36 same-topic distractors; recall@k with 95% CI, MRR, nDCG@5, per-case decision margin) — **added 2026-10-02**, closing the gap this table recorded |

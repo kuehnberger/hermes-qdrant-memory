@@ -158,7 +158,7 @@ def _models():
 # ---------------------------------------------------------------------------
 
 PLUGIN_NAME = "qdrant"
-PLUGIN_VERSION = "0.1.7"
+PLUGIN_VERSION = "0.1.8"
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +313,14 @@ def _load_plugin_config() -> dict:
     except Exception as e:
         logger.debug("Qdrant env override unavailable (no secret scope): %s", e)
 
+    # `display` (the nested `display.level` block) is a documented key of THIS
+    # file that is deliberately not a flat provider knob: display_level() reads
+    # it straight from qdrant.json, defensively, and the flat config never
+    # carries it. Removing it here keeps a documented key from being reported
+    # as a typo by the sweep below — reporting it as unknown would warn users
+    # about the exact key 0.1.8 tells them to write.
+    merged.pop("display", None)
+
     # Unknown keys are dropped WITH a warning, not silently: a typo'd key that
     # reads as configured-but-inert is the failure class that took a peer
     # project 50 silently-ignored config keys (mnemosyne issue #482). The
@@ -327,6 +335,97 @@ def _load_plugin_config() -> dict:
         )
         merged = {k: v for k, v in merged.items() if k in known}
     return merged
+
+
+# ---------------------------------------------------------------------------
+# display.level (0.1.8)
+# ---------------------------------------------------------------------------
+
+#: The three display levels (SPEC-qdrant-display): ``off`` is 0.1.7's
+#: behaviour byte for byte, ``summary`` adds two facts to the chat indicator,
+#: ``verbose`` adds numeric operation records to the log. ``debug`` is
+#: deliberately NOT a value here — it is a log-level concern, a separate
+#: display mode, and out of scope for 0.1.8.
+DISPLAY_LEVELS = ("off", "summary", "verbose")
+
+#: Rank of each level, so callers can say ``rank >= summary`` instead of
+#: enumerating names. Missing key impossible: keys are read through
+#: :func:`display_level`, which validates against DISPLAY_LEVELS first.
+_DISPLAY_RANK = {"off": 0, "summary": 1, "verbose": 2}
+
+#: ``display.level`` defects already reported by THIS process, keyed by the
+#: full message (which embeds the path). One warning per distinct defect, not
+#: one per recall: recall_status() reads the level on every call, and a broken
+#: config must not turn agent.log into a warning stream (the spec's
+#: "parse failure => off + one warning line").
+_DISPLAY_WARNINGS: set[str] = set()
+
+
+def _display_warn_once(message: str) -> None:
+    """Log *message* at WARNING the first time this process sees it."""
+    if message in _DISPLAY_WARNINGS:
+        return
+    _DISPLAY_WARNINGS.add(message)
+    logger.warning("%s", message)
+
+
+def display_level(hermes_home: str | None = None) -> str:
+    """``display.level`` from ``<HERMES_HOME>/qdrant.json``: off|summary|verbose.
+
+    Same file as ``md_docs_roots``, read with the same defensive posture as
+    ``mdsearch.configured_roots()`` — a config file must never be able to take
+    a memory operation down:
+
+    * file absent (the default install) → ``off``, silently: that IS the
+      documented default, not an error;
+    * unreadable/malformed JSON, a non-object document, a ``display`` block of
+      the wrong type, or a value outside :data:`DISPLAY_LEVELS` (including a
+      non-string) → ``off`` plus ONE warning line for that defect, ever;
+    * value is case/whitespace-insensitive (``" Summary "`` works) so a
+      hand-edited file fails safe rather than mysteriously.
+
+    Read per call, not cached: it is a few hundred bytes, and an operator
+    editing the file should not have to restart the session for it to take
+    effect. ``hermes_home`` resolves exactly like ``_status_json_path()`` —
+    the profile home from ``initialize()``'s scoping kwargs, else the
+    process's own home.
+    """
+    import json as _json
+
+    path = _config_json_path(hermes_home)
+    try:
+        raw = _json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "off"
+    except (OSError, ValueError) as exc:
+        _display_warn_once(
+            f"display.level: {path} is unreadable ({exc}) — using off"
+        )
+        return "off"
+    if not isinstance(raw, dict):
+        _display_warn_once(
+            f"display.level: {path} does not hold a JSON object — using off"
+        )
+        return "off"
+    display = raw.get("display")
+    if display is None:
+        return "off"
+    if not isinstance(display, dict):
+        _display_warn_once(
+            f"display.level: \"display\" in {path} is a "
+            f"{type(display).__name__}, want an object — using off"
+        )
+        return "off"
+    level = display.get("level")
+    if level is None:
+        return "off"
+    if not isinstance(level, str) or level.strip().lower() not in DISPLAY_LEVELS:
+        _display_warn_once(
+            f"display.level: {level!r} in {path} is not one of "
+            f"{', '.join(DISPLAY_LEVELS)} — using off"
+        )
+        return "off"
+    return level.strip().lower()
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +476,16 @@ class QdrantMemoryProvider(MemoryProvider):
         self._status_callback: Any = None
         self._progress_mode: str = self._config.get("progress", "minimal")
         self._last_recall_count: int = 0
+        # Latency of the last SUCCESSFUL recall, milliseconds (0.1.8). None
+        # means "no timing" — first turn, or the recall failed — and the
+        # summary label then omits the ms segment rather than printing a 0 or
+        # a stale number.
+        self._last_recall_ms: int | None = None
+        # Last md_search record: {"tier", "ms", "hits", "top"} (0.1.8). The
+        # tier is the routing decision (lexical vs the semantic fallback),
+        # which no user-visible surface shows; recorded at the decision point
+        # and echoed as one numeric line at display.level=verbose.
+        self._last_md_search: dict | None = None
         # Profile home, captured from initialize()'s scoping kwargs (or left
         # empty so _state_home() resolves it from the environment). It decides
         # where qdrant.json / qdrant-status.json live — never the plugin dir.
@@ -595,6 +704,10 @@ class QdrantMemoryProvider(MemoryProvider):
 
         self._emit_progress("memory_sync", "💾 qdrant — retrieving...", verbose=True)
 
+        # Recall latency (0.1.8): nothing measured this before. Covers embed +
+        # query + dedup — the whole search, i.e. the number the user waits for.
+        t_recall = time.monotonic()
+
         try:
             # Encode query via the configured embedder. A failure raises, and
             # is logged below — it is never swallowed into a silent "".
@@ -626,10 +739,15 @@ class QdrantMemoryProvider(MemoryProvider):
                 if text:
                     pairs.append((score, text))
             pairs = self._dedup_hits(pairs)
+            # Stop the clock here: everything after is formatting. Captured on
+            # the success path only — a failed recall has no timing to show,
+            # which is why the except branch clears _last_recall_ms.
+            recall_ms = int((time.monotonic() - t_recall) * 1000)
             lines = [f"- [{score:.2f}] {text}" for score, text in pairs]
 
             count = len(lines)
             self._last_recall_count = count
+            self._last_recall_ms = recall_ms
             self._note_status(last_recall=datetime.now(UTC).isoformat(),
                               last_recall_count=count)
             if count > 0:
@@ -640,10 +758,16 @@ class QdrantMemoryProvider(MemoryProvider):
             else:
                 self._emit_progress("memory_sync", "💾 qdrant — no relevant memories")
 
+            if self._display_rank() >= _DISPLAY_RANK["verbose"]:
+                self._log_recall(count, recall_ms, pairs, session_id)
+
             return "\n".join(lines) if lines else ""
 
         except Exception as e:
             self._record_failure()
+            # No trustworthy latency for a recall that did not complete: the
+            # label must not show a stale number from an earlier turn.
+            self._last_recall_ms = None
             logger.warning("Qdrant prefetch failed: %s", e)
             return ""
 
@@ -684,9 +808,32 @@ class QdrantMemoryProvider(MemoryProvider):
         self._prefetch_thread = t
 
     def recall_status(self) -> RecallStatus:
-        """Return current recall state."""
+        """Return current recall state.
+
+        ``display.level`` (default ``off``) decides what the provider_label
+        carries, because core renders ``{glyph} {provider_label} — recalled
+        {count} memories`` and the metrics belong there: ``provider_label`` is
+        documented free text and interpolates verbatim, while ``glyph`` is a
+        symbol field no peer overrides (the decision recorded in the 0.1.8
+        spec). Exactly two facts are added, at ``summary`` and above: how fast
+        (ms) and from where (collection). The count stays core's.
+
+        At ``off`` — the default, and what every existing user has today — the
+        returned label is byte-identical to 0.1.7: ``self.name``, no metrics,
+        no collection, whatever the timing happens to be. Timing that does not
+        exist (first turn, or a failed recall) omits the ``· …ms`` segment
+        rather than printing a zero; the collection segment still stands.
+        """
+        label = self.name
+        if self._display_rank() >= _DISPLAY_RANK["summary"]:
+            ms = self._last_recall_ms
+            label = (
+                f"{self.name} · {ms}ms · {self._collection}"
+                if ms
+                else f"{self.name} · {self._collection}"
+            )
         return RecallStatus(
-            provider_label=self.name,
+            provider_label=label,
             count=self._last_recall_count,
             glyph="📖",
         )
@@ -722,27 +869,32 @@ class QdrantMemoryProvider(MemoryProvider):
             point_id = str(uuid.uuid4())
             timestamp = datetime.now(UTC).isoformat()
 
+            # The payload is built once and reused: the upsert stores it, and
+            # display.level=verbose reports its serialized size — so the number
+            # logged is the bytes actually sent, not an estimate.
+            payload = {
+                "text": combined[:2000],  # Truncate for storage
+                "session_id": session_id,
+                "timestamp": timestamp,
+                "source": "sync_turn",
+                "turn_author": turn_author,
+            }
             self._client.upsert(
                 collection_name=self._collection,
                 points=[
                     {
                         "id": point_id,
                         "vector": {"dense": dense_vec},
-                        "payload": {
-                            "text": combined[:2000],  # Truncate for storage
-                            "session_id": session_id,
-                            "timestamp": timestamp,
-                            "source": "sync_turn",
-                            "turn_author": turn_author,
-                        },
+                        "payload": payload,
                     }
                 ],
                 wait=True,
             )
             self._record_success()
+            store_ms = int((time.monotonic() - t0) * 1000)
             self._note_status(
                 last_store=datetime.now(UTC).isoformat(),
-                last_store_ms=int((time.monotonic() - t0) * 1000),
+                last_store_ms=store_ms,
             )
 
             # Get the total point count for the progress message
@@ -753,7 +905,11 @@ class QdrantMemoryProvider(MemoryProvider):
                     "memory_sync", f"💾 qdrant — stored ({count:,} points)"
                 )
             except Exception:
+                count = None
                 self._emit_progress("memory_sync", "💾 qdrant — stored")
+
+            if self._display_rank() >= _DISPLAY_RANK["verbose"]:
+                self._log_store(count, store_ms, payload)
 
         except Exception as e:
             self._record_failure()
@@ -1059,64 +1215,102 @@ class QdrantMemoryProvider(MemoryProvider):
                 f"expected at {mdsearch.db_path()}."
             )
 
-        hits = mdsearch.search_lexical(query, limit=limit, root=root)
-        lines = [f"{h.path}  [{h.heading}]" + (f"\n  {h.snippet}" if h.snippet else "")
-                 for h in hits]
+        # 0.1.8: time the whole two-tier search, and record the tier DECISION
+        # the moment it is made (`route` is assigned right where want_semantic
+        # is decided). The finally-block is the single point that writes the
+        # record and emits the one numeric line display.level=verbose asks for,
+        # so every return path after the decision — including the "nothing
+        # matched" and "semantic tier unavailable" ones — is covered without
+        # duplicating the log call five times.
+        t_md = time.monotonic()
+        route: str | None = None
+        lines: list[str] = []
+        order: list[str] = []
+        try:
+            hits = mdsearch.search_lexical(query, limit=limit, root=root)
+            lines = [f"{h.path}  [{h.heading}]"
+                     + (f"\n  {h.snippet}" if h.snippet else "")
+                     for h in hits]
+            order = [h.path for h in hits]
 
-        # 'auto': only spend the model when the lexical tier is thin. One solid
-        # hit is usually the answer; three weak ones are usually noise.
-        semantic_note = ""
-        want_semantic = mode == "always" or (mode == "auto" and len(hits) < 2)
-        if want_semantic:
-            try:
-                from . import mdsemantic
-            except ImportError as exc:
-                mdsemantic = None
-                logger.info("md_search: semantic tier not importable — %s", exc)
-
-            semantic: list = []
-            if mdsemantic is not None:
-                try:
-                    semantic = mdsemantic.search_semantic(query, limit=limit, root=root)
-                except mdsemantic.DocsBackendUnavailable as exc:
-                    if mode == "always":
-                        return (
-                            "md_search: the semantic tier is unavailable and "
-                            f"semantic='always' forbids the lexical answer. "
-                            f"Cause: {exc}\n"
-                            + (
-                                "\n".join(lines)
-                                if lines
-                                else "(no lexical matches either)"
-                            )
-                        )
-                    # Say the tier did NOT RUN, not that it found nothing. Those
-                    # are different facts and only one of them is actionable.
-                    semantic_note = (
-                        f" (the semantic fallback did not run: {exc})"
-                    )
-                    logger.info("md_search: semantic fallback skipped — %s", exc)
-
-            seen_paths = {h.path for h in hits}
-            for hit in semantic:
-                if hit.path in seen_paths:
-                    continue
-                seen_paths.add(hit.path)
-                lines.append(
-                    f"{hit.path}  [{hit.heading}]  (semantic {hit.score:.3f})"
-                )
-
-        if not lines:
-            if want_semantic and semantic_note:
-                return f"md_search: no markdown matches for {query!r}.{semantic_note}"
+            # 'auto': only spend the model when the lexical tier is thin. One
+            # solid hit is usually the answer; three weak ones are usually
+            # noise.
+            semantic_note = ""
+            want_semantic = (mode == "always"
+                             or (mode == "auto" and len(hits) < 2))
+            # Tier recorded HERE, at the decision itself: which tier ran is the
+            # routing fact a user otherwise never sees.
+            route = "semantic" if want_semantic else "lexical"
             if want_semantic:
-                return (
-                    f"md_search: no markdown matches for {query!r}. "
-                    "The semantic tier had nothing either."
+                try:
+                    from . import mdsemantic
+                except ImportError as exc:
+                    mdsemantic = None
+                    logger.info("md_search: semantic tier not importable — %s",
+                                exc)
+
+                semantic: list = []
+                if mdsemantic is not None:
+                    try:
+                        semantic = mdsemantic.search_semantic(
+                            query, limit=limit, root=root)
+                    except mdsemantic.DocsBackendUnavailable as exc:
+                        if mode == "always":
+                            return (
+                                "md_search: the semantic tier is unavailable "
+                                "and "
+                                f"semantic='always' forbids the lexical "
+                                f"answer. Cause: {exc}\n"
+                                + (
+                                    "\n".join(lines)
+                                    if lines
+                                    else "(no lexical matches either)"
+                                )
+                            )
+                        # Say the tier did NOT RUN, not that it found nothing.
+                        # Those are different facts and only one of them is
+                        # actionable.
+                        semantic_note = (
+                            f" (the semantic fallback did not run: {exc})"
+                        )
+                        logger.info(
+                            "md_search: semantic fallback skipped — %s", exc)
+
+                seen_paths = {h.path for h in hits}
+                for hit in semantic:
+                    if hit.path in seen_paths:
+                        continue
+                    seen_paths.add(hit.path)
+                    lines.append(
+                        f"{hit.path}  [{hit.heading}]  "
+                        f"(semantic {hit.score:.3f})"
+                    )
+                    order.append(hit.path)
+
+            if not lines:
+                if want_semantic and semantic_note:
+                    return (f"md_search: no markdown matches for {query!r}."
+                            f"{semantic_note}")
+                if want_semantic:
+                    return (
+                        f"md_search: no markdown matches for {query!r}. "
+                        "The semantic tier had nothing either."
+                    )
+                return f"md_search: no markdown matches for {query!r}."
+            tier = ("lexical" if not want_semantic
+                    else "lexical + semantic fallback")
+            return (f"md_search ({tier}, {len(lines)} result(s)):\n"
+                    + "\n".join(lines))
+        finally:
+            if route is not None:
+                self._log_md_search(
+                    query=query,
+                    route=route,
+                    ms=int((time.monotonic() - t_md) * 1000),
+                    hits=len(lines),
+                    top=order[0] if order else "",
                 )
-            return f"md_search: no markdown matches for {query!r}."
-        tier = "lexical" if not want_semantic else "lexical + semantic fallback"
-        return f"md_search ({tier}, {len(lines)} result(s)):\n" + "\n".join(lines)
 
     # -- Config + Tool Schemas (ABC methods) --------------------------------
 
@@ -1582,6 +1776,84 @@ class QdrantMemoryProvider(MemoryProvider):
             # A progress display failure must never break memory operations
             pass
 
+    # -- Display levels (0.1.8) ---------------------------------------------
+
+    def _display_rank(self) -> int:
+        """0 = ``off``, 1 = ``summary``, 2 = ``verbose`` — resolved per call.
+
+        Never raises: display is observability, and observability must not be
+        able to take a memory operation down — the same rule
+        :meth:`_note_status` obeys for its status-file writes.
+        """
+        try:
+            return _DISPLAY_RANK[display_level(self._hermes_home or None)]
+        except Exception:
+            return 0
+
+    def _log_recall(self, count: int, ms: int, pairs: list,
+                    session_id: str) -> None:
+        """One numeric recall record — emitted only at ``display.level=verbose``.
+
+        Spec rule c2, read strictly: scores, latencies, the session id and the
+        collection name are numbers and identifiers, a recalled message's text
+        is not — contents stay core's ``display.memory_notifications`` domain
+        and must never be duplicated into agent.log. This line therefore says
+        HOW the recall went, never WHAT came back.
+        """
+        scores = ""
+        if pairs:
+            values = [score for score, _ in pairs]
+            scores = f" (scores {min(values):.2f}–{max(values):.2f})"
+        logger.info(
+            "recall %d pts in %d ms%s session=%s collection=%s",
+            count, ms, scores, session_id or "-", self._collection,
+        )
+
+    def _log_store(self, count: int | None, ms: int, payload: dict) -> None:
+        """One numeric store record — emitted only at ``display.level=verbose``.
+
+        *count* is the live collection size (the same figure the chat line
+        shows) or ``None`` when the server did not answer, in which case the
+        segment is omitted rather than printed as a zero — the shape mirrors
+        the chat fallback, "stored (N points)" vs "stored".
+        """
+        import json as _json
+        try:
+            size = len(_json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        except (TypeError, ValueError):
+            size = 0
+        points = f"{count:,} pts " if count is not None else ""
+        size_seg = f" (+{size} B payload)" if size else ""
+        logger.info(
+            "stored %sin %d ms%s collection=%s",
+            points, ms, size_seg, self._collection,
+        )
+
+    def _log_md_search(self, *, query: str, route: str, ms: int, hits: int,
+                       top: str) -> None:
+        """Record an md_search outcome, then log it at ``level=verbose``.
+
+        The record is written unconditionally — tier and latency are state,
+        not a display choice — so the routing decision is inspectable even
+        when nothing is logged. The LINE is emitted only at verbose, and it
+        carries the tier the decision point assigned (``lexical`` /
+        ``semantic``), the latency, the hit count and the top file label: no
+        snippet, no chunk, no heading (c2).
+        """
+        self._last_md_search = {
+            "tier": route, "ms": ms, "hits": hits, "top": top,
+        }
+        if self._display_rank() < _DISPLAY_RANK["verbose"]:
+            return
+        # The query is echoed the way the spec's example line does — the tool
+        # echoes it in its own result too — while every RESULT field stays a
+        # number or a file label.
+        top_seg = f" (top={top})" if top else ""
+        logger.info(
+            'md_search "%s" → %s %d ms, %d hits%s',
+            query, route, ms, hits, top_seg,
+        )
+
     def _status_json_path(self) -> Any:
         """``<HERMES_HOME>/qdrant-status.json`` — outside the plugin member dir.
 
@@ -1640,6 +1912,11 @@ class QdrantMemoryProvider(MemoryProvider):
             "vector_size": cfg.get("vector_size", self._vector_size),
             "distance": cfg.get("distance", self._distance),
             "progress": cfg.get("progress", self._progress_mode),
+            # display.level lives in qdrant.json, not in the flat provider
+            # config, so it is resolved the same way recall_status() does —
+            # one source of truth, and `hermes memory status` can answer
+            # "what is this thing showing me?" for a fresh process.
+            "display": display_level(self._hermes_home or None),
             "api_key": "(set)" if cfg.get("api_key") or self._api_key else "(unset)",
         }
         try:

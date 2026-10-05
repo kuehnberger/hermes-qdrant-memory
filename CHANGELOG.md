@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **`display.level` — three display levels for the recall indicator**
+  (`off` | `summary` | `verbose`, default `off`). Core renders the indicator
+  as `{glyph} {provider_label} — recalled N memories`; at `summary` the
+  `provider_label` carries exactly two new facts, latency and collection:
+  `📖 qdrant · 41ms · hermes_memories — recalled 10 memories`. They live in
+  `provider_label` because core documents it as free text and interpolates it
+  verbatim, while `glyph` is a symbol field no peer overrides — the metrics
+  must not go there. `verbose` keeps that same label and adds one numeric
+  line per operation to `agent.log`: recall (points, ms, score range,
+  session, collection), store (points, ms, payload bytes, collection) and
+  md_search (tier, ms, hit count, top file label). Numbers and identifiers
+  only — no recalled message text, no snippets (rule c2). The count itself
+  stays core's; it is never repeated in the label.
+- The `md_search` tier decision and recall latency are no longer computed and
+  discarded: the tier is recorded where it is decided, and the prefetch block
+  is timed with `time.monotonic()`. Both surface only at `verbose`, so the
+  default stays byte-identical to `0.1.7` for every existing user, catalog
+  installs included. Where timing does not exist — first turn, or a failed
+  recall — the `· …ms` segment is omitted, never printed as `0`.
+- Config is `<HERMES_HOME>/qdrant.json`, same file as `md_docs_roots`, read
+  with the same defensive posture: an absent file is the documented default
+  and stays silent, while a malformed file, a wrong-typed `display` block or
+  a value outside `off|summary|verbose` degrades to `off` with one warning
+  line per defect rather than an error per recall. `hermes memory status`
+  reports the effective level under `display`.
+- `tests/test_display_levels.py` pins the four claims the spec set: the
+  default-off indicator byte for byte, the summary label format, config parse
+  failure → `off` + one warning, and caplog assertions that the verbose lines
+  carry numbers only.
+
 ### Fixed
 
 - **CI caught a bug in the fix below, on its first run — twice.** The new
