@@ -24,7 +24,7 @@ Thanks for helping. This is a **standalone Hermes plugin repo** — the repo roo
 __init__.py      # QdrantMemoryProvider + register(ctx)
 _backend.py      # qdrant_client wrapper
 _setup.py        # config-schema driven setup helper (not a CLI subcommand)
-tool_schemas.py  # the six tool schemas
+tool_schemas.py  # the tool schemas (count asserted by TestDeclarationParity)
 plugin.yaml      # the manifest (validated by `hermes plugins validate`)
 pyproject.toml   # the sole dependency authority
 tests/           # pytest; conftest.py stubs Hermes core
@@ -38,13 +38,14 @@ uv venv && uv sync          # deps only; this is a directory plugin, not a dist
 uv run pytest               # unit tests
 ```
 
-Tests that touch a real Qdrant server expect one on `http://localhost:6333`
-(`docker run -p 6333:6333 qdrant/qdrant`). They are marked
-`allow_real_home_io` in the in-tree suite; in this repo they simply skip when
-nothing is listening — see `tests/conftest.py`.
+Tests that touch a real Qdrant server need one on a non-default port
+(`docker run -p 16333:6333 qdrant/qdrant`, then
+`QDRANT_URL=http://localhost:16333 uv run pytest`). `tests/conftest.py`
+*fails loudly* if `QDRANT_URL` names Qdrant's default ports (6333 REST / 6334
+gRPC — where production lives) and skips when no scratch server is named.
 
 ## Before you open a PR
 
-- `hermes plugins validate .` passes (13/13, `security scan: safe`).
+- `hermes plugins validate .` passes (`security scan: safe`, plus the one expected warning — see AGENTS.md).
 - `plugin.yaml` `provides_tools` matches what `get_tool_schemas()` returns.
 - `CHANGELOG.md` has an entry under the unreleased heading.
