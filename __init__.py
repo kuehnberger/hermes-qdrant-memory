@@ -24,6 +24,7 @@ import logging
 import re
 import time
 import uuid
+from collections import deque
 from datetime import UTC, datetime
 from typing import Any
 
@@ -351,6 +352,16 @@ DISPLAY_LEVELS = ("off", "summary", "verbose")
 #: Rank of each level, so callers can say ``rank >= summary`` instead of
 #: enumerating names. Missing key impossible: keys are read through
 #: :func:`display_level`, which validates against DISPLAY_LEVELS first.
+def _percentile(values: list[int], pct: int) -> int:
+    """Nearest-rank percentile — the same deterministic shape as
+    ``scripts/retrieval_eval.py:percentile`` (no interpolation surprises)."""
+    if not values:
+        return 0
+    ordered = sorted(values)
+    rank = -(-pct * len(ordered) // 100)  # ceil(pct * n / 100), integer-only
+    return ordered[max(0, min(len(ordered) - 1, rank - 1))]
+
+
 _DISPLAY_RANK = {"off": 0, "summary": 1, "verbose": 2}
 
 #: ``display.level`` defects already reported by THIS process, keyed by the
@@ -481,6 +492,16 @@ class QdrantMemoryProvider(MemoryProvider):
         # summary label then omits the ms segment rather than printing a 0 or
         # a stale number.
         self._last_recall_ms: int | None = None
+        # Session hit-rate (0.1.9). attempts = recall calls that got past the
+        # circuit breaker (a FAILED attempt still counts — that turn left the
+        # user with no usable recall); hits = attempts returning >= 1 result.
+        # Process lifetime. The summary label shows ``hits N/M`` once M > 0;
+        # `hermes memory status` always reports both counters.
+        self._recall_attempts: int = 0
+        self._recall_hits: int = 0
+        # Rolling window of completed-recall latencies for p50/p95 (last 200).
+        # Status and verbose log only — percentiles never reach the chat line.
+        self._recall_ms_window: deque[int] = deque(maxlen=200)
         # Last md_search record: {"tier", "ms", "hits", "top"} (0.1.8). The
         # tier is the routing decision (lexical vs the semantic fallback),
         # which no user-visible surface shows; recorded at the decision point
@@ -704,6 +725,10 @@ class QdrantMemoryProvider(MemoryProvider):
 
         self._emit_progress("memory_sync", "💾 qdrant — retrieving...", verbose=True)
 
+        # Counted here, past the breaker: a breaker-skipped turn is not an
+        # attempt; a later failure still is (that turn got no usable recall).
+        self._recall_attempts += 1
+
         # Recall latency (0.1.8): nothing measured this before. Covers embed +
         # query + dedup — the whole search, i.e. the number the user waits for.
         t_recall = time.monotonic()
@@ -748,6 +773,9 @@ class QdrantMemoryProvider(MemoryProvider):
             count = len(lines)
             self._last_recall_count = count
             self._last_recall_ms = recall_ms
+            self._recall_ms_window.append(recall_ms)
+            if count > 0:
+                self._recall_hits += 1
             self._note_status(last_recall=datetime.now(UTC).isoformat(),
                               last_recall_count=count)
             if count > 0:
@@ -815,8 +843,10 @@ class QdrantMemoryProvider(MemoryProvider):
         {count} memories`` and the metrics belong there: ``provider_label`` is
         documented free text and interpolates verbatim, while ``glyph`` is a
         symbol field no peer overrides (the decision recorded in the 0.1.8
-        spec). Exactly two facts are added, at ``summary`` and above: how fast
-        (ms) and from where (collection). The count stays core's.
+        spec). Facts added at ``summary`` and above: how fast (ms), from where
+        (collection), and — once any recall has been attempted — the session
+        hit-rate ``hits N/M`` (N results, M attempts; process lifetime). The
+        count stays core's.
 
         At ``off`` — the default, and what every existing user has today — the
         returned label is byte-identical to 0.1.7: ``self.name``, no metrics,
@@ -832,6 +862,10 @@ class QdrantMemoryProvider(MemoryProvider):
                 if ms
                 else f"{self.name} · {self._collection}"
             )
+            # The hit-rate segment waits for the first attempt: 0/0 is noise,
+            # exactly like the omitted-ms rule above.
+            if self._recall_attempts:
+                label += f" · hits {self._recall_hits}/{self._recall_attempts}"
         return RecallStatus(
             provider_label=label,
             count=self._last_recall_count,
@@ -1804,9 +1838,16 @@ class QdrantMemoryProvider(MemoryProvider):
         if pairs:
             values = [score for score, _ in pairs]
             scores = f" (scores {min(values):.2f}–{max(values):.2f})"
+        window = ""
+        ordered = sorted(self._recall_ms_window)
+        if len(ordered) >= 2:
+            window = (
+                f" p50={_percentile(ordered, 50)}ms"
+                f" p95={_percentile(ordered, 95)}ms"
+            )
         logger.info(
-            "recall %d pts in %d ms%s session=%s collection=%s",
-            count, ms, scores, session_id or "-", self._collection,
+            "recall %d pts in %d ms%s%s session=%s collection=%s",
+            count, ms, scores, window, session_id or "-", self._collection,
         )
 
     def _log_store(self, count: int | None, ms: int, payload: dict) -> None:
@@ -1918,7 +1959,19 @@ class QdrantMemoryProvider(MemoryProvider):
             # "what is this thing showing me?" for a fresh process.
             "display": display_level(self._hermes_home or None),
             "api_key": "(set)" if cfg.get("api_key") or self._api_key else "(unset)",
+            # Session metrics (0.1.9): honest zeros in a fresh process — these
+            # are process-lifetime counters, not persisted state.
+            "recall_attempts": self._recall_attempts,
+            "recall_hits": self._recall_hits,
+            "breaker_failures": self._breaker_failures,
+            "breaker_open": self._is_breaker_open(),
         }
+        # Latency percentiles only once a recall completed — an empty window
+        # omits the keys instead of reporting a fake 0 (the omitted-ms rule).
+        if self._recall_ms_window:
+            ordered = sorted(self._recall_ms_window)
+            display["recall_ms_p50"] = _percentile(ordered, 50)
+            display["recall_ms_p95"] = _percentile(ordered, 95)
         try:
             if self._status_json_path().exists():
                 state = _json.loads(self._status_json_path().read_text())

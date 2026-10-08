@@ -27,14 +27,25 @@ should return the same lines as before the move.
 | level | what the user sees |
 |---|---|
 | `off` (default) | nothing new — the indicator is byte-identical to 0.1.7 |
-| `summary` | the chat indicator gains latency and collection: 📖 qdrant · 41ms · hermes_memories — recalled 10 memories |
-| `verbose` | the `summary` label **plus** one numeric line per recall, per store and per `md_search` in `agent.log` |
+| `summary` | the chat indicator gains latency, collection and the session hit-rate: 📖 qdrant · 41ms · hermes_memories · hits 3/5 — recalled 10 memories |
+| `verbose` | the `summary` label **plus** one numeric line per recall, per store and per `md_search` in `agent.log` (the recall line carries `p50`/`p95` over the rolling latency window once two recalls have completed) |
 
 The default is `off`, so an existing install — including a catalog install — behaves exactly as
 before until someone writes that key. The verbose lines carry numbers and identifiers only
 (latency, counts, score range, session id, collection, file labels), never recalled message text
 or search-result snippets. When no timing exists yet — the first turn, or a recall that failed —
-the `· …ms` segment is omitted rather than printed as a zero.
+the `· …ms` segment is omitted rather than printed as a zero. The `hits N/M`
+segment follows the same rule: it appears only once a recall has been attempted
+in this process — N results, M attempts, where a *failed* attempt counts (that
+turn got no usable recall) and a breaker-skipped turn does not (no recall was
+attempted) — and never at `off`.
+
+`hermes memory status` is the numbers surface: next to the effective level it
+reports `recall_attempts` and `recall_hits` (process-lifetime counters — a
+fresh process shows honest zeros), `breaker_failures` and `breaker_open`
+(circuit-breaker state), and `recall_ms_p50` / `recall_ms_p95` over a rolling
+window of completed recalls — the percentiles appear only once a recall
+completed, omitted rather than faked while the window is empty.
 
 The metrics live in `provider_label`, never in `glyph`: `glyph` is a symbol field no peer
 overrides, and `provider_label` is documented free text that interpolates verbatim.
