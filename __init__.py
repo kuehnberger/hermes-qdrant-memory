@@ -322,6 +322,14 @@ def _load_plugin_config() -> dict:
     # about the exact key 0.1.8 tells them to write.
     merged.pop("display", None)
 
+    # `md_docs_roots` is the same kind of documented, non-flat key: it belongs
+    # to md_search, which reads it straight from qdrant.json with its own
+    # validation (mdsearch.configured_roots). Dropping it here — like
+    # `display` above — keeps a documented key from being reported as a typo
+    # by the sweep below; calling a working setting "unknown" invites the user
+    # to delete it.
+    merged.pop("md_docs_roots", None)
+
     # Unknown keys are dropped WITH a warning, not silently: a typo'd key that
     # reads as configured-but-inert is the failure class that took a peer
     # project 50 silently-ignored config keys (mnemosyne issue #482). The
