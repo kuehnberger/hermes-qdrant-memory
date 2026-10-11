@@ -28,31 +28,8 @@ def _isolate_qdrant_home(tmp_path, monkeypatch):
     yield hermes_home
 
 
-@pytest.fixture
-def qdrant_provider(monkeypatch):
-    """A fresh provider built from DEFAULTS — never from operator state.
-
-    The provider's config is ``<HERMES_HOME>/qdrant.json`` plus the
-    ``memory.qdrant:`` overlay in config.yaml, both read by
-    ``_load_plugin_config()``. On a configured install that is somebody else's
-    state, not test input: the live file read ``{"progress": "verbose"}``
-    (written by ``hermes memory setup`` on 2026-09-29), which made
-    ``test_progress_mode_defaults_to_minimal`` fail here while passing in the
-    repo — a red suite nobody could attribute to the code under test.
-
-    ``config={}`` is NOT a way to opt out. ``__init__`` reads
-    ``config or _load_plugin_config()``, and the empty dict is falsy *on
-    purpose* — that fall-through is what lets a config.yaml-less install pick
-    up its own state file — so ``QdrantMemoryProvider(config={})`` still loads
-    the live file (verified: it returned ``verbose`` on the live install with
-    the state file shown above). The loader is stubbed instead.
-    Config-loading behaviour itself is covered by ``TestQdrantConfigLoading``,
-    which points the loader at a tmp dir.
-    """
-    import plugins.memory.qdrant as mod
-    monkeypatch.setattr(mod, "_load_plugin_config", lambda: {})
-    from plugins.memory.qdrant import QdrantMemoryProvider
-    return QdrantMemoryProvider()
+# The qdrant_provider fixture lives in conftest.py so every test module
+# (including test_hybrid_guards.py) can use it.
 
 
 # ---------------------------------------------------------------------------

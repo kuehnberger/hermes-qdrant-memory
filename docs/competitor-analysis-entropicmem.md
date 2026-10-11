@@ -26,7 +26,7 @@ definition of each cell. Figures below re-measured 2026-10-08.
 | `__init__.py` | 1,693 | 2,274 |
 | Tools | 7 | 7 |
 | Hooks | 5 | 0 (the three no-op stubs were deleted 2026-09-29, cc5ee7d) |
-| Tests | 895 | 257 test functions / 274 collected (4,811 lines of test code) |
+| Tests | 895 | 268 test functions / 4,987 lines of test code |
 | CLI commands | 34 | 0 |
 | Screenshots | 5 | 0 (`docs/screenshots/README.md` is a capture plan, not shots) |
 | Eval harness | `evals/` with datasets + baselines | `scripts/retrieval_eval.py` (36 targets + 36 same-topic distractors; recall@k with 95% CI, MRR, nDCG@5, per-case decision margin) — **added 2026-10-02**, closing the gap this table recorded |
