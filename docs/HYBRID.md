@@ -59,29 +59,44 @@ substring of retrieved text; each example session-filtered. Re-run it
 yourself: `scripts/hybrid_eval.py` (scratch collection only, never touches
 your live store).
 
-**Preliminary, n=200 (first 200 examples):**
+**Full run, n=1,000 (all examples):**
 
 | arm | recall@5 | recall@10 |
 |---|---:|---:|
-| dense only | 0.455 | 0.500 |
-| + bm25 (RRF) | 0.490 | 0.505 |
-| + bm42 (RRF) | 0.485 | 0.505 |
+| dense only | 0.398 | 0.434 |
+| + bm25 (RRF) | 0.428 | 0.458 |
+| + bm42 (RRF) | 0.421 | 0.461 |
+
+Substantive answers only (answer length ≥ 10 chars, n=544) — the harder,
+more honest subset:
+
+| arm | recall@5 | recall@10 |
+|---|---:|---:|
+| dense only | 0.232 | 0.254 |
+| + bm25 (RRF) | 0.246 | 0.272 |
+| + bm42 (RRF) | 0.244 | 0.279 |
+
+Per-example win/loss vs dense (per 1,000 examples):
+
+| arm | @5 wins / losses | @10 wins / losses |
+|---|---:|---:|
+| + bm25 | +38 / −8 | **+24 / −0** |
+| + bm42 | +30 / −7 | +29 / −2 |
 
 **Honest limits of that table:**
 
-- The gain is real but concentrated at **recall@5 (+0.035, ~7 of 200
-  examples)**; recall@10 moved +0.005 (1 example) — flat within noise.
-- `bm25` and `bm42` are indistinguishable at this size; we ship bm25 because
-  it is 10 MB, literal BM25, and a dependency either way.
-- The first 200 examples are the *short* half of the dataset (the full
-  1,000-example dense baseline is **0.278** recall@10, not 0.500 — the two
-  rows are not comparable across sample sizes; only the columns inside one
-  table are).
+- The gain is modest but consistent: **+0.024–0.027 recall@10** (+5–6%
+  relative). bm25 is *strictly additive at @10* — it never lost an example
+  dense alone had found.
+- `bm42` edges `bm25` at @10 on substantive answers (0.279 vs 0.272) but
+  costs 90 MB instead of 10 MB; we ship and recommend **bm25** because the
+  trade (−0.007 on the hard subset for −80 MB) favours it for most users.
+  (The model is a single constant, `SPARSE_MODEL_NAME` in `__init__.py`;
+  swapping it to the bm42 name is a one-line change, not a config knob.)
 - Substring answer matching is a generous proxy; it flatters all three arms
   equally, so the *deltas* are the signal, not the absolutes.
-
-A full 1,000-example run (both halves) is the confirmation pass; its numbers
-replace this table when it lands.
+- This measures ranking on one benchmark; your corpus may differ. The
+  re-runnable script (`scripts/hybrid_eval.py`) is the source of truth.
 
 ## When *not* to turn it on
 

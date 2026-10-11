@@ -3,7 +3,16 @@
 embedding, win/loss vs dense, and an answer-length guard.
 
 One scratch collection with three vectors. Never touches hermes_memories.
+
+RAM-lean restructure (2026-10-11, GK directive "smooth operations"):
+the original loaded all 3 ONNX models at once (~2-2.5G peak, OOM-killed
+twice on the 6.9 GB host). Now models load SEQUENTIALLY per BLOCK of
+texts: dense pass -> free -> bm25 pass -> free -> bm42 pass -> free ->
+upsert the block. Peak = one model (~0.8-1G) + one block of embeddings.
+Resume semantics unchanged: same collection, uuid5 point ids (idempotent
+upserts), per-example count-skip, same final marker 'win/loss vs dense'.
 """
+import gc
 import os
 import time
 import uuid
@@ -17,20 +26,26 @@ Q = "http://localhost:6333"
 PROBE = "hermes_memories_hybrid_probe_v2"
 SAMPLE = int(os.environ.get("SAMPLE", "1000"))
 MIN_ANS = 10  # substantive-answer threshold for the strict view
+# RAM knob (sequential models): texts embedded per model-load cycle.
+# 1024 texts -> ~50-100 MB of intermediate vectors, and only 3 model
+# loads per block (~3-5 s each from warm cache) instead of per chunk.
+BLOCK = 1024
+# Per-batch embed size inside a block. 64: 128-sized chunks + ONNX were
+# occasionally OOM-killed under concurrent agent load (silent SIGKILL).
+CHUNK = 64
+
+DENSE_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+BM25_NAME = "Qdrant/bm25"
+BM42_NAME = "Qdrant/bm42-all-minilm-l6-v2-attentions"
 
 c = QdrantClient(Q, timeout=300)
-dense = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
-sp_bm25 = SparseTextEmbedding("Qdrant/bm25")
-sp_bm42 = SparseTextEmbedding("Qdrant/bm42-all-minilm-l6-v2-attentions")
 
 existing = {c_.name for c_ in c.get_collections().collections}
 if PROBE not in existing:
     c.create_collection(
         PROBE,
         vectors_config={
-            "dense": models.VectorParams(
-                size=384, distance=models.Distance.COSINE,
-            ),
+            "dense": models.VectorParams(size=384, distance=models.Distance.COSINE),
         },
         sparse_vectors_config={
             "bm25": models.SparseVectorParams(),
@@ -62,8 +77,31 @@ def to_sv(s):
     return models.SparseVector(indices=s.indices.tolist(), values=s.values.tolist())
 
 
-# ---- ingest: self-resuming, chunk-batched embedding (no multiprocessing) ----
-print(f"ingesting up to {SAMPLE} examples into {PROBE} (resumable, chunk-batched)...")
+def embed_dense_block(texts):
+    """Load dense model, embed texts in CHUNK batches, free the model."""
+    m = TextEmbedding(DENSE_NAME)
+    out = []
+    for start in range(0, len(texts), CHUNK):
+        out.extend(v.tolist() for v in m.embed(texts[start:start + CHUNK], parallel=1))
+    del m
+    gc.collect()
+    return out
+
+
+def embed_sparse_block(texts, name):
+    """Load one sparse model, embed texts in CHUNK batches, free the model."""
+    m = SparseTextEmbedding(name)
+    out = []
+    for start in range(0, len(texts), CHUNK):
+        out.extend(to_sv(s) for s in m.embed(texts[start:start + CHUNK]))
+    del m
+    gc.collect()
+    return out
+
+
+# ---- ingest: self-resuming, sequential-model block embedding ----
+print(f"ingesting up to {SAMPLE} examples into {PROBE} "
+      f"(resumable, sequential models, BLOCK={BLOCK})...")
 t0 = time.time()
 pending = []
 for ex in ds.select(range(SAMPLE)):
@@ -79,15 +117,20 @@ for ex in ds.select(range(SAMPLE)):
 print(f"  {len(pending)} examples to ingest ({SAMPLE} checked, rest already stored)")
 
 items = [(sid, t) for sid, ts in pending for t in ts]
-CHUNK = 128
-for start in range(0, len(items), CHUNK):
-    chunk = items[start:start + CHUNK]
-    texts = [t for _, t in chunk]
-    dvs = [v.tolist() for v in dense.embed(texts, parallel=0)]
-    s25 = [to_sv(s) for s in sp_bm25.embed(texts)]
-    s42 = [to_sv(s) for s in sp_bm42.embed(texts)]
+
+# Per BLOCK: dense pass -> free -> bm25 pass -> free -> bm42 pass -> free
+# -> upsert. Never more than ONE model resident; intermediate vectors are
+# bounded by BLOCK (~50-100 MB).
+for b0 in range(0, len(items), BLOCK):
+    b1 = min(b0 + BLOCK, len(items))
+    btexts = [t for _, t in items[b0:b1]]
+
+    dvs = embed_dense_block(btexts)
+    s25 = embed_sparse_block(btexts, BM25_NAME)
+    s42 = embed_sparse_block(btexts, BM42_NAME)
+
     per = {}
-    for i, (sid, t) in enumerate(chunk):
+    for i, (sid, t) in enumerate(items[b0:b1]):
         per.setdefault(sid, []).append(models.PointStruct(
             id=uuid.uuid5(uuid.NAMESPACE_URL, sid + "\n" + t),
             vector={"dense": dvs[i], "bm25": s25[i], "bm42": s42[i]},
@@ -95,9 +138,7 @@ for start in range(0, len(items), CHUNK):
         ))
     for pts in per.values():
         c.upsert(PROBE, points=pts)
-    done = start + len(chunk)
-    if (start // CHUNK + 1) % 4 == 0 or done == len(items):
-        print(f"  embedded {done}/{len(items)} texts ({time.time()-t0:.0f}s)")
+    print(f"  embedded {b1}/{len(items)} texts ({time.time()-t0:.0f}s)")
 
 # ---- collect valid questions, batch-embed all queries once ----
 valid = [ex for ex in ds.select(range(SAMPLE))
@@ -105,10 +146,17 @@ valid = [ex for ex in ds.select(range(SAMPLE))
 queries = [str(ex["question"]).strip() for ex in valid]
 answers = [str(ex["answer"]).strip() for ex in valid]
 sids = [str(ex["question_id"]) for ex in valid]
-print(f"querying {len(valid)} examples (batch-embedding queries)...")
-q_dv = [v.tolist() for v in dense.embed(queries, parallel=0)]
-q_s25 = [to_sv(s) for s in sp_bm25.embed(queries)]
-q_s42 = [to_sv(s) for s in sp_bm42.embed(queries)]
+del ds  # RAM knob: frees the Arrow table before the query loop
+gc.collect()
+print(f"querying {len(valid)} examples (batch-embedding queries, sequential models)...")
+# Sequential model loads: 1000 short queries are cheap per model; each
+# model is freed before the next loads. parallel=1 on dense: ORT default
+# (parallel=0 -> cpu_count-1 threads) allocates a per-thread arena; on the
+# 6.9 GB host that is the dominant avoidable cost. Slower embedding, but
+# the run is self-resuming so wall time is bounded.
+q_dv = embed_dense_block(queries)
+q_s25 = embed_sparse_block(queries, BM25_NAME)
+q_s42 = embed_sparse_block(queries, BM42_NAME)
 
 arms = {"dense": [0, 0], "bm25": [0, 0], "bm42": [0, 0]}       # [r5, r10] all
 strict = {"dense": [0, 0], "bm25": [0, 0], "bm42": [0, 0]}     # [r5, r10] len>=MIN_ANS
@@ -120,21 +168,18 @@ t1 = time.time()
 for i in range(len(valid)):
     flt = models.Filter(must=[{"key": "session_id", "match": {"value": sids[i]}}])
     res = {
-        "dense": c.query_points(
-            PROBE, query=q_dv[i], using="dense", query_filter=flt, limit=10,
-        ),
+        "dense": c.query_points(PROBE, query=q_dv[i], using="dense",
+                               query_filter=flt, limit=10),
         "bm25": c.query_points(
             PROBE, query=models.FusionQuery(fusion=models.Fusion.RRF),
             prefetch=[models.Prefetch(query=q_dv[i], using="dense"),
                       models.Prefetch(query=q_s25[i], using="bm25")],
-            query_filter=flt, limit=10,
-        ),
+            query_filter=flt, limit=10),
         "bm42": c.query_points(
             PROBE, query=models.FusionQuery(fusion=models.Fusion.RRF),
             prefetch=[models.Prefetch(query=q_dv[i], using="dense"),
                       models.Prefetch(query=q_s42[i], using="bm42")],
-            query_filter=flt, limit=10,
-        ),
+            query_filter=flt, limit=10),
     }
     al = answers[i].lower()
     hit = {}
