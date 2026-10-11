@@ -332,7 +332,7 @@ class TestQdrantConfigSchemaContract:
         fields = _normalize_memory_provider_schema("qdrant", qdrant_provider)
         assert {f["key"] for f in fields} == {
             "url", "api_key", "collection", "vector_size", "distance",
-            "embedder", "model", "device", "progress"}
+            "embedder", "model", "device", "progress", "hybrid"}
 
     def test_secret_field_declares_env_var(self, qdrant_provider):
         """Secrets route to .env through the field's env_var, not a config key."""

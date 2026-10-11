@@ -105,7 +105,9 @@ def main():
             sessions = ex.get("haystack_sessions", [])
             turns = _flatten_sessions(sessions)
             for u, a in turns:
-                provider.handle_tool_call("qdrant_upsert", {"text": f"User: {u}\nAssistant: {a}", "session_id": sid})
+                provider.handle_tool_call("qdrant_upsert", {
+                    "text": f"User: {u}\nAssistant: {a}", "session_id": sid,
+                })
         print(f"  ingested {idx + 1} examples")
 
         # ---- evaluate recall ----
@@ -119,8 +121,14 @@ def main():
             ans = str(ex.get("answer", "")).strip()
             if not q or not ans:
                 continue
-            res = provider.handle_tool_call("qdrant_search", {"query": q, "limit": 10, "session_id": ex.get("question_id", f"ex{idx}")})
-            hits = [line.split("] ", 1)[1] if "] " in line else line for line in res.splitlines()]
+            res = provider.handle_tool_call("qdrant_search", {
+                "query": q, "limit": 10,
+                "session_id": ex.get("question_id", f"ex{idx}"),
+            })
+            hits = [
+                line.split("] ", 1)[1] if "] " in line else line
+                for line in res.splitlines()
+            ]
             recall5 += _recall_at_k(hits, ans, 5)
             recall10 += _recall_at_k(hits, ans, 10)
             mrr_sum += _mrr(hits, ans)

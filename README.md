@@ -74,12 +74,21 @@ never in a config file.
 
 Numbers and identifiers only — never message text.
 
+## Optional: hybrid search (dense + BM25)
+
+`"hybrid": "on"` in `qdrant.json` adds a 10 MB BM25 sparse vector next to the
+semantic one and fuses both rankings (RRF). Off by default, and it only takes
+effect for collections *created* with it on — existing stores stay untouched,
+with a warning instead of a migration. Measured gain, honest limits, and a
+re-runnable harness: **`docs/HYBRID.md`**.
+
 ## Where the detail lives
 
 This file is the entry point. Everything else is in:
 
 - **`docs/DEV.md`** — architecture, embedder backends, the knowledge index, backups,
   the eval harness, and what is deliberately not implemented.
+- **`docs/HYBRID.md`** — hybrid search: measured numbers, the collection rule, limits.
 - **`CONTRIBUTING.md`** — ground rules, layout, and the PR checklist.
 - **`AGENTS.md`** — the decisions whose reversal costs a review round (for contributors).
 - **`CHANGELOG.md`** — what changed in each release.

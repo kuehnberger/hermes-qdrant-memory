@@ -22,8 +22,8 @@ definition of each cell. Figures below re-measured 2026-10-08.
 
 | | EntropicMem | Ours |
 |---|---|---|
-| Python lines | 13,604 (plugin) / ~32,500 (repo) | 4,101 (plugin, excl. tests and scripts) |
-| `__init__.py` | 1,693 | 2,078 |
+| Python lines | 13,604 (plugin) / ~32,500 (repo) | 4,297 (plugin, excl. tests and scripts) |
+| `__init__.py` | 1,693 | 2,274 |
 | Tools | 7 | 7 |
 | Hooks | 5 | 0 (the three no-op stubs were deleted 2026-09-29, cc5ee7d) |
 | Tests | 895 | 257 test functions / 274 collected (4,811 lines of test code) |
