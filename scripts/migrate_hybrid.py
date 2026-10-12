@@ -185,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     scanned = backfilled = skipped = missing_text = failed = 0
+    no_sparse_text = 0
     started = time.time()
 
     for page in _iter_points(client, args.collection, args.batch_size,
@@ -217,6 +218,15 @@ def main(argv: list[str] | None = None) -> int:
                 if failed <= 5:
                     print(f"  sparse embed failed for {p.id}: {e}", file=sys.stderr)
                 continue
+            # A stopword-only text ("how are you doing?") tokenizes to an
+            # EMPTY bm25 vector. Qdrant's update_vectors rejects that with
+            # 422 "must specify vectors to update for point", so such a point
+            # is left dense-only — which is correct, the sparse arm has
+            # nothing to match. (A full upsert tolerates the empty vector;
+            # update_vectors does not — verified on 1.19.2.)
+            if not len(sv.indices):
+                no_sparse_text += 1
+                continue
             updates.append(m.PointVectors(id=p.id, vector={SPARSE_VECTOR_NAME: sv}))
 
         if write and updates:
@@ -225,8 +235,17 @@ def main(argv: list[str] | None = None) -> int:
                                       points=updates, wait=True)
                 backfilled += len(updates)
             except Exception as e:
-                failed += len(updates)
-                print(f"  update_vectors batch failed: {e}", file=sys.stderr)
+                # One rejected point must not cost the other 255 in the
+                # batch: retry individually and keep the successes.
+                print(f"  batch failed ({str(e)[:120]}); retrying per point",
+                      file=sys.stderr)
+                for pv in updates:
+                    try:
+                        client.update_vectors(collection_name=args.collection,
+                                              points=[pv], wait=True)
+                        backfilled += 1
+                    except Exception:
+                        failed += 1
 
         if scanned and scanned % (args.batch_size * 4) == 0:
             rate = scanned / max(time.time() - started, 1e-9)
@@ -242,6 +261,8 @@ def main(argv: list[str] | None = None) -> int:
     if write:
         print(f"already had sparse: {skipped:,}")
     print(f"no text payload:    {missing_text:,}")
+    if no_sparse_text:
+        print(f"stopword-only text: {no_sparse_text:,} (left dense-only)")
     if failed:
         print(f"failed:             {failed:,}")
     print(f"scanned:            {scanned:,} / {total:,}")

@@ -378,6 +378,22 @@ _HYBRID_TRUTHY = {"on", "true", "yes", "1"}
 _HYBRID_FALSY = {"off", "false", "no", "0", ""}
 
 
+def sparse_vector_params():
+    """The sparse-vector schema both hybrid paths must declare.
+
+    Single source of truth: a fresh collection (create_collection) and a
+    migrated one (_add_sparse_vector_in_place) have to behave identically, or
+    the same query returns different rankings depending on when the store was
+    created. The IDF modifier is what makes a rare term outweigh a common
+    one — measured +0.025 sparse-arm recall@5 vs no modifier (n=40, 365
+    docs), and it is what Qdrant's own hybrid-search guide prescribes for
+    BM25.
+    """
+    from qdrant_client.http import models as _m
+
+    return _m.SparseVectorParams(modifier=_m.Modifier.IDF)
+
+
 def hybrid_requested(raw: object) -> bool:
     """Parse the ``hybrid`` config knob. Default off unless clearly truthy.
 
@@ -536,11 +552,11 @@ class QdrantMemoryProvider(MemoryProvider):
         # working. Mode is controlled by config: "off" | "minimal" | "verbose".
         self._status_callback: Any = None
         self._progress_mode: str = self._config.get("progress", "minimal")
-        # Hybrid retrieval (0.1.9, opt-in). _hybrid_requested comes from
-        # config; _hybrid_active flips to True only after initialize()
-        # confirms the collection DECLARES the sparse vector — Qdrant cannot
-        # add one afterwards (see SPARSE_VECTOR_NAME), so an existing
-        # dense-only store keeps running dense-only instead of migrating.
+        # Hybrid retrieval (opt-in). _hybrid_requested comes from config;
+        # _hybrid_active flips to True only after initialize() confirms the
+        # collection DECLARES the sparse vector — adding it in place on a
+        # dense-only store is done there (Qdrant >= 1.18 create_vector_name),
+        # with scripts/migrate_hybrid.py to backfill the existing points.
         self._hybrid_requested = hybrid_requested(self._config.get("hybrid"))
         self._hybrid_active = False
         self._sparse_embedder: Any = None
@@ -713,10 +729,11 @@ class QdrantMemoryProvider(MemoryProvider):
             if self._hybrid_requested:
                 # Declare the sparse vector at creation time: one call
                 # instead of create-then-alter, and no backfill needed for
-                # an empty collection.
-                from qdrant_client.models import SparseVectorParams
+                # an empty collection. sparse_vector_params() is shared with
+                # the in-place path so a fresh and a migrated collection
+                # rank identically.
                 create_kwargs["sparse_vectors_config"] = {
-                    SPARSE_VECTOR_NAME: SparseVectorParams()
+                    SPARSE_VECTOR_NAME: sparse_vector_params()
                 }
             self._client.create_collection(
                 collection_name=self._collection,
@@ -799,7 +816,9 @@ class QdrantMemoryProvider(MemoryProvider):
                 collection_name=self._collection,
                 vector_name=SPARSE_VECTOR_NAME,
                 vector_name_config=_m.SparseVectorNameConfig(
-                    sparse=_m.SparseVectorConfig(modifier=_m.Modifier.IDF)
+                    sparse=_m.SparseVectorConfig(
+                        modifier=sparse_vector_params().modifier
+                    )
                 ),
             )
         except Exception as e:

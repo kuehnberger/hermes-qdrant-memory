@@ -9,16 +9,19 @@ All notable changes to this project are documented here. The format is based on
 ### Added
 
 - **`hybrid` — opt-in dense + BM25 sparse retrieval** (default `off`).
-  `"hybrid": "on"` in `qdrant.json` declares a `bm25` sparse vector at
-  collection creation, embeds every new memory both ways, and fuses the two
-  rankings with RRF at recall. Existing collections are never migrated and
-  never broken: Qdrant 1.19.2 cannot add a sparse vector in place, so an
-  already-created dense-only store logs one actionable warning and stays
-  dense-only. Any sparse-arm failure (embedder missing, model undownloadable)
-  degrades to dense-only with a warning — an optional arm can cost the
-  improvement, never the memory and never the recall. `hermes memory status`
-  reports `on` / `off` / `inactive`. Measured numbers, the collection rule,
-  and a re-runnable harness (`scripts/hybrid_eval.py`): `docs/HYBRID.md`.
+  `"hybrid": "on"` in `qdrant.json` declares a `bm25` sparse vector (IDF
+  modifier), embeds every new memory both ways, and fuses the two rankings
+  with RRF at recall. A fresh collection declares the sparse vector at
+  creation; an **existing dense-only collection is migrated in place** —
+  the plugin adds the sparse vector itself (Qdrant >= 1.18
+  `create_vector_name`) and `scripts/migrate_hybrid.py` backfills the
+  existing points (resumable, dense vectors untouched). On a server older
+  than 1.18 it stays dense-only with one warning. Any sparse-arm failure
+  (embedder missing, model undownloadable) degrades to dense-only with a
+  warning — an optional arm can cost the improvement, never the memory and
+  never the recall. `hermes memory status` reports `on` / `off` /
+  `inactive`. Measured numbers, the collection rule, and a re-runnable
+  harness (`scripts/hybrid_eval.py`): `docs/HYBRID.md`.
 
 - **`display.level` — three display levels for the recall indicator**
   (`off` | `summary` | `verbose`, default `off`). Core renders the indicator

@@ -258,3 +258,38 @@ class TestAddSparseVectorInPlace:
         client.get_collection.side_effect = RuntimeError("connection reset")
         monkeypatch.setattr(qdrant_provider, "_client", client)
         assert qdrant_provider._add_sparse_vector_in_place() is False
+
+
+class TestSparseVectorParamsShared:
+    """A fresh collection and a migrated one must rank identically.
+
+    The two paths that declare the sparse vector (create_collection and
+    _add_sparse_vector_in_place) previously disagreed on the IDF modifier —
+    one had it, the other did not — so the same query could rank differently
+    depending on when the store was built. Both now go through
+    sparse_vector_params(); this pins that.
+    """
+
+    def test_helper_declares_idf(self):
+        from plugins.memory.qdrant import sparse_vector_params
+        from qdrant_client.http import models as m
+
+        assert sparse_vector_params().modifier == m.Modifier.IDF
+
+    def test_in_place_path_uses_the_helper(self, monkeypatch, qdrant_provider):
+        """The in-place call must carry exactly what the helper returns."""
+        from unittest.mock import MagicMock
+
+        from plugins.memory.qdrant import SPARSE_VECTOR_NAME, sparse_vector_params
+
+        client = MagicMock()
+        client.get_collection.return_value = type("I", (), {
+            "config": type("C", (), {
+                "params": type("P", (), {"sparse_vectors": {SPARSE_VECTOR_NAME: 1}})
+            })()
+        })()
+        monkeypatch.setattr(qdrant_provider, "_client", client)
+        qdrant_provider._collection = "c"
+        assert qdrant_provider._add_sparse_vector_in_place() is True
+        cfg = client.create_vector_name.call_args.kwargs["vector_name_config"]
+        assert cfg.sparse.modifier == sparse_vector_params().modifier

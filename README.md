@@ -77,10 +77,11 @@ Numbers and identifiers only — never message text.
 ## Optional: hybrid search (dense + BM25)
 
 `"hybrid": "on"` in `qdrant.json` adds a 10 MB BM25 sparse vector next to the
-semantic one and fuses both rankings (RRF). Off by default, and it only takes
-effect for collections *created* with it on — existing stores stay untouched,
-with a warning instead of a migration. Measured gain, honest limits, and a
-re-runnable harness: **`docs/HYBRID.md`**.
+semantic one and fuses both rankings (RRF). Off by default. A fresh collection
+declares the sparse vector at creation; an existing dense-only store gets it
+added in place and its old points backfilled with one command
+(`python scripts/migrate_hybrid.py --collection hermes_memories --yes`).
+Measured gain, honest limits, and a re-runnable harness: **`docs/HYBRID.md`**.
 
 ## Where the detail lives
 

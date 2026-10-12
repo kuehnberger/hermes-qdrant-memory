@@ -20,20 +20,26 @@ a typo can never switch a feature on that wasn't asked for.
 
 ## The collection rule (read this first)
 
-**Hybrid applies to collections created while it is on — not to existing
-ones.** Qdrant 1.19.2 refuses to add a sparse vector to an existing
-collection (verified: `update_collection(sparse_vectors_config=...)` →
-400 `Not existing vector name`). So:
+**Hybrid applies from the moment you enable it — a fresh collection declares
+the sparse vector at creation, and an existing dense-only collection gets it
+added in place.** Qdrant >= 1.18 supports adding a named vector to a live
+collection (`create_vector_name`); on an older server the plugin stays
+dense-only with one warning. Note that `update_collection` does **not** work
+for this — it answers 400 `Not existing vector name` — which is the trap that
+made an earlier version of this plugin claim the migration was impossible.
 
 - **Fresh install + `hybrid: "on"`** → collection is created with a `bm25`
-  sparse vector; every memory is embedded both ways; recall is fused.
-- **Existing collection + `hybrid: "on"`** → one warning, dense-only for the
-  session. No migration, no failed writes, nothing changes. Enabling it on an
-  old store means recreating the collection (or pointing at a new name) and
-  re-ingesting.
+  sparse vector (IDF modifier); every memory is embedded both ways; recall is
+  fused. No backfill needed.
+- **Existing collection + `hybrid: "on"`** → the plugin adds the sparse vector
+  in place and activates hybrid. Points written before that moment carry no
+  sparse value until they are backfilled — run `scripts/migrate_hybrid.py`
+  once (resumable, ~1 min for a 130k store; dense vectors are untouched).
+  Until the backfill runs, the sparse arm simply matches the newer points and
+  the dense arm covers everything, so recall is never worse than dense-only.
 - **`hybrid: "off"` (default)** → byte-identical to the previous behaviour.
 
-`hermes memory status` reports which of the three states you're in
+`hermes memory status` reports which state you're in
 (`on` / `off` / `inactive: collection has no sparse vector`).
 
 ## What happens per operation
