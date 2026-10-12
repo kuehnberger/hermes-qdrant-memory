@@ -274,8 +274,10 @@ def main(argv: list[str] | None = None) -> int:
     # -- 4. Verify -----------------------------------------------------------
     if write and backfilled:
         after = client.get_collection(args.collection)
-        print(f"points after: {after.points_count:,} "
-              f"(unchanged: {after.points_count == total})")
+        delta = after.points_count - total
+        note = ("unchanged" if delta == 0
+                else f"+{delta:,} added by other writers during the run")
+        print(f"points after: {after.points_count:,} ({note})")
     return 0
 
 
