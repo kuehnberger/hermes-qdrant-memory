@@ -357,12 +357,16 @@ def _load_plugin_config() -> dict:
 #: display mode, and out of scope for 0.1.8.
 DISPLAY_LEVELS = ("off", "summary", "verbose")
 
-#: Hybrid retrieval (0.1.9, opt-in): the sparse vector name the collection
-#: must declare, and the fastembed model that fills it (10 MB, already a
-#: dependency — no new package). Qdrant 1.19.2 refuses to add a sparse
-#: vector to an existing collection (verified: ``update_collection`` ->
-#: 400 "Not existing vector name"), which is why hybrid is per-collection
-#: from creation time, never a migration.
+#: Hybrid retrieval (opt-in): the sparse vector name the collection must
+#: declare, and the fastembed model that fills it (10 MB, already a
+#: dependency — no new package).
+#:
+#: Adding the sparse vector to an EXISTING dense-only collection works on
+#: Qdrant >= 1.18 via the dedicated ``create_vector_name`` endpoint — NOT
+#: via ``update_collection``, which rejects it with 400 "Not existing
+#: vector name". Verified on 1.19.2. Points added before the upgrade carry
+#: no sparse value until they are re-upserted, so enabling hybrid on a
+#: populated store needs one backfill pass (``scripts/migrate_hybrid.py``).
 SPARSE_VECTOR_NAME = "bm25"
 SPARSE_MODEL_NAME = "Qdrant/bm25"
 
@@ -707,10 +711,9 @@ class QdrantMemoryProvider(MemoryProvider):
                 },
             }
             if self._hybrid_requested:
-                # Declare the sparse vector NOW: Qdrant 1.19.2 refuses to
-                # add one to an existing collection (verified — 400 "Not
-                # existing vector name"), so creation time is the only
-                # moment this is free.
+                # Declare the sparse vector at creation time: one call
+                # instead of create-then-alter, and no backfill needed for
+                # an empty collection.
                 from qdrant_client.models import SparseVectorParams
                 create_kwargs["sparse_vectors_config"] = {
                     SPARSE_VECTOR_NAME: SparseVectorParams()
@@ -735,9 +738,12 @@ class QdrantMemoryProvider(MemoryProvider):
                 logger.debug("Payload index creation: %s", e)
 
         # Hybrid activation: config asks for it AND the collection declares
-        # the sparse vector. An existing dense-only collection stays
-        # dense-only with one actionable warning — never a migration, never
-        # a failed write (the server refuses new sparse vectors in place).
+        # the sparse vector. When the collection is dense-only and the
+        # server supports it (Qdrant >= 1.18), add the sparse vector in
+        # place and activate — a populated store then needs one backfill
+        # pass to fill existing points (scripts/migrate_hybrid.py), which
+        # the warning names. If the server is too old, stay dense-only with
+        # an actionable warning — never a failed write.
         self._hybrid_active = False
         if self._hybrid_requested:
             try:
@@ -745,12 +751,21 @@ class QdrantMemoryProvider(MemoryProvider):
                 declared = info.config.params.sparse_vectors or {}
                 if SPARSE_VECTOR_NAME in declared:
                     self._hybrid_active = True
+                elif self._add_sparse_vector_in_place():
+                    self._hybrid_active = True
+                    logger.info(
+                        "hybrid: added sparse vector %r to existing "
+                        "collection %r — run scripts/migrate_hybrid.py to "
+                        "backfill sparse vectors onto existing points.",
+                        SPARSE_VECTOR_NAME, self._collection,
+                    )
                 else:
                     logger.warning(
                         "hybrid: on, but collection %r has no sparse vector "
-                        "— dense-only. Qdrant cannot add one in place; "
-                        "recreate the collection (with hybrid: on) to "
-                        "enable it.", self._collection,
+                        "and this Qdrant server cannot add one in place "
+                        "(needs >= 1.18) — dense-only. Upgrade Qdrant, or "
+                        "recreate the collection (with hybrid: on).",
+                        self._collection,
                     )
             except Exception as e:
                 logger.warning(
@@ -761,6 +776,43 @@ class QdrantMemoryProvider(MemoryProvider):
         self._initialized = True
         logger.info("QdrantMemoryProvider initialized (url=%s, collection=%s)",
                     self._url, self._collection)
+
+    def _add_sparse_vector_in_place(self) -> bool:
+        """Add the sparse vector to an existing dense-only collection.
+
+        Qdrant >= 1.18 exposes ``PUT /collections/{name}/vectors/{vector_name}``
+        (client: ``create_vector_name``) which extends a live collection's
+        vector schema without a recreate. ``update_collection`` does NOT work
+        for this — it answers 400 "Not existing vector name" — which is the
+        trap that made an earlier version of this code claim the migration was
+        impossible.
+
+        Returns ``True`` when the schema now declares the sparse vector (so
+        the caller can activate hybrid), ``False`` when the server is too old
+        or the call is refused. Never raises: a schema change that fails must
+        degrade to dense-only, not take the provider down.
+        """
+        from qdrant_client.http import models as _m
+
+        try:
+            self._client.create_vector_name(
+                collection_name=self._collection,
+                vector_name=SPARSE_VECTOR_NAME,
+                vector_name_config=_m.SparseVectorNameConfig(
+                    sparse=_m.SparseVectorConfig(modifier=_m.Modifier.IDF)
+                ),
+            )
+        except Exception as e:
+            logger.debug("hybrid: create_vector_name refused (%s)", e)
+            return False
+        # Confirm from the server, not from the call's return value.
+        try:
+            info = self._client.get_collection(self._collection)
+            declared = info.config.params.sparse_vectors or {}
+            return SPARSE_VECTOR_NAME in declared
+        except Exception as e:
+            logger.debug("hybrid: could not confirm sparse schema (%s)", e)
+            return False
 
     def system_prompt_block(self) -> str:
         """Static info about Qdrant status for the system prompt."""
