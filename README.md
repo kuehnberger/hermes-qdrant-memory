@@ -46,6 +46,27 @@ hermes memory setup qdrant
 Then talk to your agent. Memory writes on its own; `hermes memory status` shows whether
 the provider is connected and what it last stored.
 
+## Prefill from history you already have
+
+A memory provider only knows what it saw, so a fresh install starts empty even
+if your agent has months of conversations. One command fixes that — it reads
+the profile's session database and writes every stored message into the
+collection, so recall works from the first turn:
+
+```bash
+# see what it would do (writes nothing)
+python scripts/backfill_memory.py --profile <name>
+
+# do it
+python scripts/backfill_memory.py --profile <name> --yes
+```
+
+Sessions already in the store are skipped, point ids are deterministic, and
+the run is safe against a live profile (the database is opened read-only), so
+re-running only fills genuine gaps. It is also the migration path between
+memory providers, and the way to seed a store you are moving to a new
+machine. Detail: **`docs/DEV.md`**.
+
 ## Configuration
 
 Settings live in `<HERMES_HOME>/qdrant.json` (created `0600`, no credentials):

@@ -15,6 +15,47 @@ backing up means moving the server's data:
 To verify a restore: `qdrant_collect(action="info")` shows the point count, and a session recall
 should return the same lines as before the move.
 
+## Filling a store: backfill and hybrid migration
+
+Two scripts cover the two ways a store ends up incomplete. Both are standalone
+(no Hermes core on `sys.path`), both default to a dry run, and both are safe to
+re-run.
+
+**`scripts/backfill_memory.py` — a store with no history in it.** Reads the
+profile's `state.db` (opened read-only, WAL included, so a live profile is
+safe) and writes each stored message as one point per 2000-char chunk, in the
+shape the store already uses: `kind` (user/assistant/tool), `chunk_index`,
+`session_id`, `source`, `timestamp`. Point ids are `uuid5(session, message,
+chunk)`, so a re-run overwrites rather than duplicates. Sessions already
+present are skipped by default (`--no-skip-existing` to override), which makes
+it safe to run against a store the live path is already feeding.
+
+```bash
+python scripts/backfill_memory.py --profile qd                 # dry run
+python scripts/backfill_memory.py --profile qd --yes           # write
+python scripts/backfill_memory.py --profile qd --sources cron --yes
+```
+
+**`scripts/migrate_hybrid.py` — a dense-only store you want hybrid on.** The
+provider adds the sparse vector to an existing collection itself on the next
+`initialize()` (Qdrant >= 1.18 `create_vector_name`), but points written before
+that carry no sparse value. This script walks the collection once and attaches
+them with `update_vectors`, which replaces only the sparse vector — the dense
+vector and payload are never rewritten, so nothing is re-embedded and nothing
+can drift. Resumable: a point that already has a sparse value is skipped.
+
+```bash
+python scripts/migrate_hybrid.py --collection hermes_memories            # dry run
+python scripts/migrate_hybrid.py --collection hermes_memories --yes      # write
+python scripts/migrate_hybrid.py --collection hermes_memories --add-schema --yes
+```
+
+Measured on a 130k-point store: 120,412 points backfilled in ~13.5 min, 196
+left dense-only because their text tokenizes to an empty bm25 vector
+(stopword-only strings like `"how are you doing?"`), which is correct — the
+sparse arm has nothing to match on those. A full `upsert` tolerates an empty
+sparse vector; `update_vectors` rejects it, which is why the script skips them.
+
 ## Display levels
 
 `display.level` is a **nested** key of the same `<HERMES_HOME>/qdrant.json` that holds
