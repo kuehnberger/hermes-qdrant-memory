@@ -47,9 +47,12 @@ if PROBE not in existing:
         vectors_config={
             "dense": models.VectorParams(size=384, distance=models.Distance.COSINE),
         },
+        # IDF modifier, matching the shipped schema (sparse_vector_params()).
+        # The published +0.024 was measured WITHOUT it; this run refreshes the
+        # number against what actually ships.
         sparse_vectors_config={
-            "bm25": models.SparseVectorParams(),
-            "bm42": models.SparseVectorParams(),
+            "bm25": models.SparseVectorParams(modifier=models.Modifier.IDF),
+            "bm42": models.SparseVectorParams(modifier=models.Modifier.IDF),
         },
     )
 
