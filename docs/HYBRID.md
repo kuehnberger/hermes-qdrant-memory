@@ -61,17 +61,18 @@ this plugin, no new package.
 
 **Method:** LongMemEval (`LIXINYI33/longmemeval-s`), one collection with all
 three vectors, three query arms on the same questions; answer-hit as a
-substring of retrieved text; each example session-filtered. Re-run it
-yourself: `scripts/hybrid_eval.py` (scratch collection only, never touches
-your live store).
+substring of retrieved text; each example session-filtered. **Measured against
+the shipped schema** — `bm25` and `bm42` declared with `modifier: IDF`, exactly
+as the plugin creates them. Re-run it yourself: `scripts/hybrid_eval.py`
+(scratch collection only, never touches your live store).
 
 **Full run, n=1,000 (all examples):**
 
 | arm | recall@5 | recall@10 |
 |---|---:|---:|
 | dense only | 0.398 | 0.434 |
-| + bm25 (RRF) | 0.428 | 0.458 |
-| + bm42 (RRF) | 0.421 | 0.461 |
+| + bm25 (RRF) | 0.428 | 0.456 |
+| + bm42 (RRF) | 0.419 | 0.460 |
 
 Substantive answers only (answer length ≥ 10 chars, n=544) — the harder,
 more honest subset:
@@ -79,21 +80,23 @@ more honest subset:
 | arm | recall@5 | recall@10 |
 |---|---:|---:|
 | dense only | 0.232 | 0.254 |
-| + bm25 (RRF) | 0.246 | 0.272 |
-| + bm42 (RRF) | 0.244 | 0.279 |
+| + bm25 (RRF) | 0.250 | 0.272 |
+| + bm42 (RRF) | 0.246 | 0.279 |
 
 Per-example win/loss vs dense (per 1,000 examples):
 
 | arm | @5 wins / losses | @10 wins / losses |
 |---|---:|---:|
-| + bm25 | +38 / −8 | **+24 / −0** |
-| + bm42 | +30 / −7 | +29 / −2 |
+| + bm25 | +39 / −9 | **+24 / −2** |
+| + bm42 | +31 / −10 | +28 / −2 |
 
 **Honest limits of that table:**
 
-- The gain is modest but consistent: **+0.024–0.027 recall@10** (+5–6%
-  relative). bm25 is *strictly additive at @10* — it never lost an example
-  dense alone had found.
+- The gain is modest but consistent: **+0.022–0.026 recall@10** (+5–6%
+  relative). bm25 is *near-additive at @10* — it wins 24 examples and loses
+  only 2 (the 2 losses are the price of RRF re-ranking, and the same run
+  measured them at zero before the IDF modifier was applied; treat the
+  strict-additivity claim as withdrawn).
 - `bm42` edges `bm25` at @10 on substantive answers (0.279 vs 0.272) but
   costs 90 MB instead of 10 MB; we ship and recommend **bm25** because the
   trade (−0.007 on the hard subset for −80 MB) favours it for most users.
