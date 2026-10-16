@@ -1,6 +1,6 @@
 # Qdrant memory provider for Hermes
 
-Self-hostable vector memory for [Hermes Agent](https://github.com/NousResearch/hermes-agent),
+**Local-first**, self-hostable vector memory for [Hermes Agent](https://github.com/NousResearch/hermes-agent),
 backed by [Qdrant](https://qdrant.tech). No cloud dependency, no embedding API
 key, no per-query cost.
 
@@ -198,8 +198,9 @@ rather than as a flat knob:
 
 The default is `off`, so an existing install — including a catalog install —
 behaves exactly as before until someone writes that key. The verbose lines
-carry numbers and identifiers only (latency, counts, score range, session id,
-collection, file labels), never recalled message text or search-result
+carry numbers and identifiers (latency, counts, score range, session id,
+collection, file labels) plus, on an `md_search` line, the query you
+searched, echoed back; never recalled message text or search-result
 snippets. When no timing exists yet — the first turn, or a recall that failed
 — the `· …ms` segment is omitted rather than printed as a zero.
 
@@ -246,8 +247,9 @@ rule 13:
 **The embedding model is loaded in-process, once per process.** The plugin
 registers native Hermes tools; it is not a server, so the model weights are
 `mmap`-ed into whatever process is doing the embedding — each Hermes gateway,
-dashboard, CLI session and cron worker pays for its own copy. Measured on this
-host with the default `fastembed` backend (MiniLM-L6-v2, 384 dims), 5 concurrent
+dashboard, CLI session and cron worker pays for its own copy. This is a
+**local-first** architecture: embeddings run on your machine, never in the cloud.
+Measured on this host with the default `fastembed` backend (MiniLM-L6-v2, 384 dims), 5 concurrent
 processes each loading the model and embedding 20 texts:
 
 | | 1 process | 5 concurrent processes |

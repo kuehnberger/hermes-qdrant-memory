@@ -18,8 +18,10 @@ All notable changes to this project are documented here. The format is based on
   must not go there. `verbose` keeps that same label and adds one numeric
   line per operation to `agent.log`: recall (points, ms, score range,
   session, collection), store (points, ms, payload bytes, collection) and
-  md_search (tier, ms, hit count, top file label). Numbers and identifiers
-  only — no recalled message text, no snippets (rule c2). The count itself
+  md_search (tier, ms, hit count, top file label, and the query you
+  searched, echoed back — the only text any verbose line carries).
+  Numbers and identifiers otherwise; no recalled message text, no snippets
+  (rule c2). The count itself
   stays core's; it is never repeated in the label.
 - The `md_search` tier decision and recall latency are no longer computed and
   discarded: the tier is recorded where it is decided, and the prefetch block
