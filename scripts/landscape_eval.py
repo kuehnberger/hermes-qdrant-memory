@@ -107,7 +107,12 @@ RESULTS: dict[str, Any] = {
 }
 
 
-def run_cmd(cmd: list[str], cwd: Path = REPO_ROOT, env: dict | None = None, timeout: int = 300) -> tuple[int, str, str]:
+def run_cmd(
+    cmd: list[str],
+    cwd: Path = REPO_ROOT,
+    env: dict | None = None,
+    timeout: int = 300,
+) -> tuple[int, str, str]:
     """Run command and return (exit_code, stdout, stderr)."""
     merged_env = os.environ.copy()
     merged_env.update(RAM_ENV)
@@ -129,7 +134,11 @@ def parse_retrieval_eval(stdout: str) -> dict:
     data = {}
     for line in stdout.splitlines():
         line = line.strip()
-        if line.startswith("recall@1") and "recall@10" not in line and "recall@5" not in line:
+        if (
+            line.startswith("recall@1")
+            and "recall@10" not in line
+            and "recall@5" not in line
+        ):
             parts = line.split()
             data["recall@1"] = float(parts[1])
             # Find the CI part in parentheses
@@ -148,7 +157,8 @@ def parse_retrieval_eval(stdout: str) -> dict:
         elif line.startswith("beats its own distractor"):
             data["beats_distractor"] = float(line.split()[4])
         elif "margin vs distractor" in line:
-            # Line: "margin vs distractor      median 0.170, min 0.010, 10 case(s) decided by <0.10"
+            # Line: "margin vs distractor      median 0.170, min 0.010,
+            #       10 case(s) decided by <0.10"
             parts = line.split()
             for i, p in enumerate(parts):
                 if p == "median":
@@ -190,7 +200,9 @@ def parse_md_eval(stdout: str) -> dict:
             parts = line.split(":")
             data["top_hit_corpus_root"] = parts[1].strip()
         elif line.startswith("diacritics equivalence"):
-            data["diacritics_equivalence"] = "passed" if "yes" in line.lower() else "failed"
+            data["diacritics_equivalence"] = (
+                "passed" if "yes" in line.lower() else "failed"
+            )
         elif line.startswith("lexical latency"):
             # Line: "lexical latency: p50 60.6ms  min 2.8ms  max 238.0ms"
             parts = line.split()
@@ -210,7 +222,11 @@ def parse_md_eval(stdout: str) -> dict:
                     "case": parts[0],
                     "ok": parts[1] == "yes",
                     "hits": int(parts[2]) if parts[2].isdigit() else 0,
-                    "ms": float(parts[3].replace(",", "")) if parts[3].replace(".", "").replace(",", "").isdigit() else 0,
+                    "ms": (
+                        float(parts[3].replace(",", ""))
+                        if parts[3].replace(".", "").replace(",", "").isdigit()
+                        else 0
+                    ),
                 })
     return data
 
@@ -236,7 +252,9 @@ def run_md_search_eval() -> dict:
 def run_mutation_check() -> dict:
     """Run mutation checks."""
     print("Running mutation_check_mdsearch.py...")
-    rc, out, err = run_cmd([PYTHON, "scripts/mutation_check_mdsearch.py"], cwd=REPO_ROOT)
+    rc, out, err = run_cmd(
+        [PYTHON, "scripts/mutation_check_mdsearch.py"], cwd=REPO_ROOT
+    )
     return {"exit_code": rc, "all_caught": rc == 0, "output": out[-500:] if out else ""}
 
 
@@ -250,7 +268,11 @@ def run_docs_honesty() -> dict:
 def run_full_test_suite() -> dict:
     """Run the full pytest suite and capture summary."""
     print("Running full pytest suite...")
-    rc, out, err = run_cmd([PYTHON, "-m", "pytest", "tests/", "-q", "--tb=no"], cwd=REPO_ROOT, timeout=600)
+    rc, out, err = run_cmd(
+        [PYTHON, "-m", "pytest", "tests/", "-q", "--tb=no"],
+        cwd=REPO_ROOT,
+        timeout=600,
+    )
     passed = failed = skipped = 0
     for line in out.splitlines():
         if "passed" in line and "failed" in line:
@@ -294,13 +316,27 @@ def check_footprint() -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Landscape evaluation for qdrant plugin")
-    parser.add_argument("--skip-tests", action="store_true", help="Skip full pytest suite")
-    parser.add_argument("--output", default="/home/gk/.hermes/state/qdrant/landscape_eval_results.json", help="Output JSON file")
+    parser = argparse.ArgumentParser(
+        description="Landscape evaluation for qdrant plugin"
+    )
+    parser.add_argument(
+        "--skip-tests", action="store_true", help="Skip full pytest suite"
+    )
+    parser.add_argument(
+        "--output",
+        default="/home/gk/.hermes/state/qdrant/landscape_eval_results.json",
+        help="Output JSON file",
+    )
     parser.add_argument("--wait-for-probe", action="store_true",
-                        help="If a hybrid probe is alive, wait up to 90 min for it to finish instead of aborting")
+                        help=(
+                            "If a hybrid probe is alive, wait up to 90 min for it "
+                            "to finish instead of aborting"
+                        ))
     parser.add_argument("--force", action="store_true",
-                        help="Skip the policy-window and co-tenant gates (use only on battery/outside window deliberately)")
+                        help=(
+                            "Skip the policy-window and co-tenant gates "
+                            "(use only on battery/outside window deliberately)"
+                        ))
     args = parser.parse_args()
 
     print("=" * 60)
@@ -315,7 +351,10 @@ def main():
     # Gate 1: policy window (04:00-14:00 CEST + mains power)
     ok, why = check_policy_window()
     if not ok and not args.force:
-        print(f"ABORT: policy gate failed ({why}). Use --force to override deliberately.")
+        print(
+            f"ABORT: policy gate failed ({why}). "
+            "Use --force to override deliberately."
+        )
         return 2
     if not ok:
         print(f"WARN: policy gate failed ({why}) — continuing due to --force.")
@@ -325,12 +364,18 @@ def main():
         if args.wait_for_probe:
             print("Co-tenant probe alive — waiting up to 90 min for it to finish...")
             if not wait_for_probe(max_minutes=90):
-                print("ABORT: probe still alive after 90 min. Re-run later or use --force.")
+                print(
+                    "ABORT: probe still alive after 90 min. "
+                    "Re-run later or use --force."
+                )
                 return 3
             print("Probe finished — continuing.")
         elif not args.force:
-            print("ABORT: hybrid probe is alive (stacking eval on it spiked the box to 3.3G"
-                  " on 2026-10-10). Re-run with --wait-for-probe, or --force if you accept the risk.")
+            print(
+                "ABORT: hybrid probe is alive (stacking eval on it "
+                "spiked the box to 3.3G on 2026-10-10). Re-run with "
+                "--wait-for-probe, or --force if you accept the risk."
+            )
             return 3
         else:
             print("WARN: hybrid probe is alive — continuing due to --force.")
@@ -374,8 +419,14 @@ def main():
     print(f"  MRR: {RESULTS['retrieval_eval'].get('mrr', 'N/A')}")
     print(f"  nDCG@5: {RESULTS['retrieval_eval'].get('ndcg@5', 'N/A')}")
     print(f"  latency p95: {RESULTS['retrieval_eval'].get('latency_p95_ms', 'N/A')} ms")
-    print(f"  mutation check: {'PASS' if RESULTS['mutation_check'].get('all_caught') else 'FAIL'}")
-    print(f"  docs honesty: {'PASS' if RESULTS['docs_honesty'].get('clean') else 'FAIL'}")
+    print(
+        f"  mutation check: "
+        f"{'PASS' if RESULTS['mutation_check'].get('all_caught') else 'FAIL'}"
+    )
+    print(
+        f"  docs honesty: "
+        f"{'PASS' if RESULTS['docs_honesty'].get('clean') else 'FAIL'}"
+    )
     print(f"  plugin size: {RESULTS['footprint'].get('plugin_dir_size', 'N/A')}")
     return 0 if all([
         RESULTS['mutation_check'].get('all_caught'),

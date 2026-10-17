@@ -42,6 +42,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **CI lint gate is green again.** `scripts/landscape_eval.py` and
+  `scripts/longmemeval_eval.py` failed `ruff check .` with 20 errors
+  (18× E501, W292, F841) since 2026-10-05 — all lines wrapped to the
+  88-char limit, the trailing newline restored, and the unused `report`
+  assignment in the LongMemEval harness dropped. Plugin code untouched.
+
 - **CI caught a bug in the fix below, on its first run — twice.** The new
   peer-table re-measurement walked the tree with `rglob`, so it counted
   everything that happens to sit inside the checkout as plugin source: first

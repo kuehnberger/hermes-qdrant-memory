@@ -221,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="LongMemEval eval")
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args(argv)
-    report = run(keep=args.keep)
+    run(keep=args.keep)
     return 0
 
 
