@@ -42,6 +42,25 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **The LongMemEval harness parsed search output by line, not by result —
+  fixed (v2.0.0-result-boundary).** `_tool_search` returns one header per
+  hit (`[0.85] (point_id) text`) but the stored text spans dozens of lines,
+  so `recall@5`/`recall@10` were measuring line numbers and the miss
+  definition (`> 5`) inherited the defect. The harness now splits on result
+  boundaries (the two-decimal score requirement keeps continuation lines
+  from false-matching), adds `--collection` / `--hybrid` / `--misses-out`,
+  and dumps every miss as JSONL. Correctly parsed: recall@1 0.340,
+  recall@5 0.600, recall@10 0.686 — not 0.340/0.340/0.344 as published. The
+  published "330 misses" were a parser artefact; the true miss set is 200.
+- **The published before/after (dense 24.2% → hybrid 34.0%) was a
+  collection-pollution artefact — measured, not asserted.** The dense arm
+  ran on a collection still holding ~1,900 stale points from an earlier
+  corpus; the hybrid arm ran on a clean one — and the "after" collection
+  holds **no sparse vectors at all** (dense-only search reproduces 0.340).
+  Adding 1,923 distractors to a clean 948-point collection reproduces the
+  published baseline (0.238/381 vs 0.242/379). The true hybrid effect on a
+  clean collection is **+8.6 pts recall@1 (0.340 → 0.426)**, re-baselined
+  at +9.4 pts (0.340 → 0.434) — not the published +40%.
 - **CI lint gate is green again.** `scripts/landscape_eval.py` and
   `scripts/longmemeval_eval.py` failed `ruff check .` with 20 errors
   (18× E501, W292, F841) since 2026-10-05 — all lines wrapped to the
