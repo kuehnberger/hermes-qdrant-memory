@@ -39,6 +39,11 @@ LME_PATH = Path(
     "datasets--xiaowu0162--longmemeval-cleaned/snapshots/"
     "98d7416c24c778c2fee6e6f3006e7a073259d48f/longmemeval_oracle.json"
 )
+if not LME_PATH.exists():
+    # The HF hub cache is pruned on some hosts; fall back to the stable copy
+    # shipped with the eval tooling (identical file, sha256
+    # 821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c).
+    LME_PATH = Path.home() / ".hermes/state/qdrant/eval-data/longmemeval_oracle.json"
 
 # _tool_search emits one header per hit: "[0.85] (point_id) text" where the
 # text itself spans many lines. Scores are formatted "%.2f" by the plugin, so
