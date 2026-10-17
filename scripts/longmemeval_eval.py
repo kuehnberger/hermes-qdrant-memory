@@ -128,7 +128,21 @@ def run(
     if str(tests_dir) not in sys.path:
         sys.path.insert(0, str(tests_dir))
     import conftest  # noqa: F401
-    from plugins.memory.qdrant import QdrantMemoryProvider, hybrid_requested
+    try:
+        from plugins.memory.qdrant import QdrantMemoryProvider, hybrid_requested
+    except ImportError:
+        # A repo checkout whose __init__.py predates hybrid wiring. Dense
+        # still works; the hybrid arm must refuse loudly rather than silently
+        # run dense on a plugin that cannot do hybrid.
+        from plugins.memory.qdrant import QdrantMemoryProvider
+
+        def hybrid_requested(raw: object) -> bool:
+            if raw:
+                raise RuntimeError(
+                    "this plugin build predates hybrid wiring; the hybrid "
+                    "arm cannot run against it (use the deployed plugin)"
+                )
+            return False
 
     # Construct from the LIVE plugin config (same as v1.x), guard against
     # the configured collection, then override collection + hybrid on the
