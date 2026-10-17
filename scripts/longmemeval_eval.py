@@ -128,20 +128,23 @@ def run(
     if str(tests_dir) not in sys.path:
         sys.path.insert(0, str(tests_dir))
     import conftest  # noqa: F401
-    from plugins.memory.qdrant import QdrantMemoryProvider
+    from plugins.memory.qdrant import QdrantMemoryProvider, hybrid_requested
 
-    provider = QdrantMemoryProvider({
-        "collection": collection,
-        "url": "http://localhost:6333",
-        "hybrid": hybrid,
-        "progress": "off",
-    })
-    real_collection = provider._config.get("collection")
+    # Construct from the LIVE plugin config (same as v1.x), guard against
+    # the configured collection, then override collection + hybrid on the
+    # instance. Passing the collection inside the config dict instead would
+    # make the guard compare the argument against itself and always fire.
+    provider = QdrantMemoryProvider()
+    real_collection = provider._collection
     if collection == real_collection:
         raise SystemExit(
             f"refusing to run: eval collection {collection!r} equals the "
             f"configured collection {real_collection!r}"
         )
+    provider._collection = collection
+    provider._config["collection"] = collection
+    provider._config["progress"] = "off"
+    provider._hybrid_requested = hybrid_requested(hybrid)
     provider.initialize("eval")
 
     data = load_longmemeval(LME_PATH)
