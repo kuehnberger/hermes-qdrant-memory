@@ -14,6 +14,8 @@ and never constructs a ``QdrantBackend``. Only ``TestQdrantBackendConnectivity``
 exercises this class today. ``hybrid_search()`` and
 ``setup_scalar_quantization()`` in particular are implemented but UNWIRED — do
 not advertise either as a provider capability until the provider calls them.
+(The provider's own hybrid path is separate and IS live when ``hybrid: on`` is
+set; it does not go through this class.)
 
 The provider imports nothing from here; it imports qdrant_client lazily so a
 missing dependency degrades to "unavailable" instead of an import error.

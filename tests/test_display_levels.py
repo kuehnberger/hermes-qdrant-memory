@@ -5,9 +5,10 @@ Four claims, one per gate the spec set:
 * the DEFAULT (``display.level`` absent) renders the chat indicator byte for
   byte as 0.1.7 did — no metrics, no collection, no latency, whatever the
   timing state happens to be;
-* ``summary`` puts exactly two new facts in ``provider_label`` — ms and the
-  collection — and drops the ``· …ms`` segment when no timing exists instead
-  of printing a zero;
+* ``summary`` puts the new facts in ``provider_label`` — ms, the collection
+  and (from the first recall attempt on) the ``hits N/M`` session hit-rate —
+  and drops the ``· …ms`` segment when no timing exists instead of printing a
+  zero;
 * a broken config degrades to ``off`` with ONE warning line, never an
   exception and never a warning per recall;
 * ``verbose`` writes numeric operation records (recall / store / md_search)
@@ -374,8 +375,10 @@ class TestVerboseRecall:
         with caplog.at_level(logging.INFO, logger=LOGGER):
             assert provider.prefetch("anything", session_id="s") == ""
         assert provider._last_recall_ms is None
+        # The failed attempt still counts: that turn got no usable recall, so
+        # the hit-rate shows 0/1 rather than hiding the miss.
         assert provider.recall_status().provider_label == (
-            "qdrant · hermes_memories"
+            "qdrant · hermes_memories · hits 0/1"
         )
 
 

@@ -4,18 +4,21 @@ Self-hostable vector-memory backend using Qdrant (REST). No cloud dependency
 required. Registered by the Hermes memory-provider loader via
 ``ctx.register_memory_provider(QdrantMemoryProvider())``.
 
-What actually works today (see _backend.py for the unwired extras):
+What actually works today:
 
   - Dense semantic search over a single named "dense" vector
+  - Hybrid dense+BM25 sparse retrieval fused with RRF (opt-in, ``hybrid: on``)
   - Session-scoped recall via a ``session_id`` payload filter
   - Verbatim turn storage (sync_turn) with payload metadata
   - A circuit breaker (5 failures -> 120s cooldown) around the I/O paths
   - Honest availability reporting: is_available() / check_backend() /
     unavailable_reason() distinguish config errors from a dead server
 
-What exists in ``_backend.py`` but is NOT on the live path — do not advertise
-it until it is wired into the provider: hybrid dense+sparse RRF search and
-INT8 scalar quantization.
+``_backend.py`` is a parallel implementation of the same operations — a
+library, not the live path (see its STATUS note): ``QdrantMemoryProvider``
+talks to ``QdrantClient`` directly. INT8 scalar quantization exists there and
+is *not* wired into the provider; the provider's own hybrid path is separate
+and IS live when ``hybrid: on`` is set.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import logging
 import re
 import time
 import uuid
+from collections import deque
 from datetime import UTC, datetime
 from typing import Any
 
@@ -321,12 +325,20 @@ def _load_plugin_config() -> dict:
     # about the exact key 0.1.8 tells them to write.
     merged.pop("display", None)
 
+    # `md_docs_roots` is the same kind of documented, non-flat key: it belongs
+    # to md_search, which reads it straight from qdrant.json with its own
+    # validation (mdsearch.configured_roots). Dropping it here — like
+    # `display` above — keeps a documented key from being reported as a typo
+    # by the sweep below; calling a working setting "unknown" invites the user
+    # to delete it.
+    merged.pop("md_docs_roots", None)
+
     # Unknown keys are dropped WITH a warning, not silently: a typo'd key that
     # reads as configured-but-inert is the failure class that took a peer
     # project 50 silently-ignored config keys (mnemosyne issue #482). The
     # warning makes the mistake visible; the drop keeps behaviour honest to it.
     known = {"collection", "vector_size", "distance", "url", "api_key",
-             "embedder", "model", "device", "progress"}
+             "embedder", "model", "device", "progress", "hybrid"}
     unknown = sorted(set(merged) - known)
     if unknown:
         logger.warning(
@@ -348,9 +360,77 @@ def _load_plugin_config() -> dict:
 #: display mode, and out of scope for 0.1.8.
 DISPLAY_LEVELS = ("off", "summary", "verbose")
 
+#: Hybrid retrieval (opt-in): the sparse vector name the collection must
+#: declare, and the fastembed model that fills it (10 MB, already a
+#: dependency — no new package).
+#:
+#: Adding the sparse vector to an EXISTING dense-only collection works on
+#: Qdrant >= 1.18 via the dedicated ``create_vector_name`` endpoint — NOT
+#: via ``update_collection``, which rejects it with 400 "Not existing
+#: vector name". Verified on 1.19.2. Points added before the upgrade carry
+#: no sparse value until they are re-upserted, so enabling hybrid on a
+#: populated store needs one backfill pass (``scripts/migrate_hybrid.py``).
+SPARSE_VECTOR_NAME = "bm25"
+SPARSE_MODEL_NAME = "Qdrant/bm25"
+
+#: Accepted truthy spellings for the ``hybrid`` knob. YAML parses an
+#: unquoted ``on`` as boolean ``True``; JSON stores the string ``"on"`` —
+#: both must land in the same place. Anything unrecognized resolves OFF:
+#: a typo must never turn ON a feature the operator did not ask for.
+_HYBRID_TRUTHY = {"on", "true", "yes", "1"}
+_HYBRID_FALSY = {"off", "false", "no", "0", ""}
+
+
+def sparse_vector_params():
+    """The sparse-vector schema both hybrid paths must declare.
+
+    Single source of truth: a fresh collection (create_collection) and a
+    migrated one (_add_sparse_vector_in_place) have to behave identically, or
+    the same query returns different rankings depending on when the store was
+    created. The IDF modifier is what makes a rare term outweigh a common
+    one — measured +0.025 sparse-arm recall@5 vs no modifier (n=40, 365
+    docs), and it is what Qdrant's own hybrid-search guide prescribes for
+    BM25.
+    """
+    from qdrant_client.http import models as _m
+
+    return _m.SparseVectorParams(modifier=_m.Modifier.IDF)
+
+
+def hybrid_requested(raw: object) -> bool:
+    """Parse the ``hybrid`` config knob. Default off unless clearly truthy.
+
+    An unrecognized non-empty value logs one warning and resolves to off —
+    the same fail-safe posture ``display_level`` takes with bad values.
+    """
+    if isinstance(raw, bool):
+        return raw
+    if raw is None:
+        return False
+    text = str(raw).strip().lower()
+    if text in _HYBRID_TRUTHY:
+        return True
+    if text in _HYBRID_FALSY:
+        return False
+    logger.warning(
+        "memory.qdrant: hybrid: unrecognized value %r — treating as off "
+        "(valid: on/off)", raw,
+    )
+    return False
+
 #: Rank of each level, so callers can say ``rank >= summary`` instead of
 #: enumerating names. Missing key impossible: keys are read through
 #: :func:`display_level`, which validates against DISPLAY_LEVELS first.
+def _percentile(values: list[int], pct: int) -> int:
+    """Nearest-rank percentile — the same deterministic shape as
+    ``scripts/retrieval_eval.py:percentile`` (no interpolation surprises)."""
+    if not values:
+        return 0
+    ordered = sorted(values)
+    rank = -(-pct * len(ordered) // 100)  # ceil(pct * n / 100), integer-only
+    return ordered[max(0, min(len(ordered) - 1, rank - 1))]
+
+
 _DISPLAY_RANK = {"off": 0, "summary": 1, "verbose": 2}
 
 #: ``display.level`` defects already reported by THIS process, keyed by the
@@ -475,12 +555,31 @@ class QdrantMemoryProvider(MemoryProvider):
         # working. Mode is controlled by config: "off" | "minimal" | "verbose".
         self._status_callback: Any = None
         self._progress_mode: str = self._config.get("progress", "minimal")
+        # Hybrid retrieval (opt-in). _hybrid_requested comes from config;
+        # _hybrid_active flips to True only after initialize() confirms the
+        # collection DECLARES the sparse vector — adding it in place on a
+        # dense-only store is done there (Qdrant >= 1.18 create_vector_name),
+        # with scripts/migrate_hybrid.py to backfill the existing points.
+        self._hybrid_requested = hybrid_requested(self._config.get("hybrid"))
+        self._hybrid_active = False
+        self._sparse_embedder: Any = None
+        self._sparse_error: str = ""
         self._last_recall_count: int = 0
         # Latency of the last SUCCESSFUL recall, milliseconds (0.1.8). None
         # means "no timing" — first turn, or the recall failed — and the
         # summary label then omits the ms segment rather than printing a 0 or
         # a stale number.
         self._last_recall_ms: int | None = None
+        # Session hit-rate (0.1.9). attempts = recall calls that got past the
+        # circuit breaker (a FAILED attempt still counts — that turn left the
+        # user with no usable recall); hits = attempts returning >= 1 result.
+        # Process lifetime. The summary label shows ``hits N/M`` once M > 0;
+        # `hermes memory status` always reports both counters.
+        self._recall_attempts: int = 0
+        self._recall_hits: int = 0
+        # Rolling window of completed-recall latencies for p50/p95 (last 200).
+        # Status and verbose log only — percentiles never reach the chat line.
+        self._recall_ms_window: deque[int] = deque(maxlen=200)
         # Last md_search record: {"tier", "ms", "hits", "top"} (0.1.8). The
         # tier is the routing decision (lexical vs the semantic fallback),
         # which no user-visible surface shows; recorded at the decision point
@@ -622,14 +721,26 @@ class QdrantMemoryProvider(MemoryProvider):
                 "Creating collection %s (dims=%d, distance=%s, named vector 'dense')",
                 self._collection, self._vector_size, self._distance,
             )
-            self._client.create_collection(
-                collection_name=self._collection,
-                vectors_config={
+            create_kwargs: dict[str, Any] = {
+                "vectors_config": {
                     "dense": VectorParams(
                         size=self._vector_size,
                         distance=Distance[self._distance.upper()],
                     )
                 },
+            }
+            if self._hybrid_requested:
+                # Declare the sparse vector at creation time: one call
+                # instead of create-then-alter, and no backfill needed for
+                # an empty collection. sparse_vector_params() is shared with
+                # the in-place path so a fresh and a migrated collection
+                # rank identically.
+                create_kwargs["sparse_vectors_config"] = {
+                    SPARSE_VECTOR_NAME: sparse_vector_params()
+                }
+            self._client.create_collection(
+                collection_name=self._collection,
+                **create_kwargs,
             )
             # Payload indexes for session scoping
             try:
@@ -646,9 +757,84 @@ class QdrantMemoryProvider(MemoryProvider):
             except Exception as e:
                 logger.debug("Payload index creation: %s", e)
 
+        # Hybrid activation: config asks for it AND the collection declares
+        # the sparse vector. When the collection is dense-only and the
+        # server supports it (Qdrant >= 1.18), add the sparse vector in
+        # place and activate — a populated store then needs one backfill
+        # pass to fill existing points (scripts/migrate_hybrid.py), which
+        # the warning names. If the server is too old, stay dense-only with
+        # an actionable warning — never a failed write.
+        self._hybrid_active = False
+        if self._hybrid_requested:
+            try:
+                info = self._client.get_collection(self._collection)
+                declared = info.config.params.sparse_vectors or {}
+                if SPARSE_VECTOR_NAME in declared:
+                    self._hybrid_active = True
+                elif self._add_sparse_vector_in_place():
+                    self._hybrid_active = True
+                    logger.info(
+                        "hybrid: added sparse vector %r to existing "
+                        "collection %r — run scripts/migrate_hybrid.py to "
+                        "backfill sparse vectors onto existing points.",
+                        SPARSE_VECTOR_NAME, self._collection,
+                    )
+                else:
+                    logger.warning(
+                        "hybrid: on, but collection %r has no sparse vector "
+                        "and this Qdrant server cannot add one in place "
+                        "(needs >= 1.18) — dense-only. Upgrade Qdrant, or "
+                        "recreate the collection (with hybrid: on).",
+                        self._collection,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "hybrid: cannot read collection config (%s) — "
+                    "dense-only this session.", e,
+                )
+
         self._initialized = True
         logger.info("QdrantMemoryProvider initialized (url=%s, collection=%s)",
                     self._url, self._collection)
+
+    def _add_sparse_vector_in_place(self) -> bool:
+        """Add the sparse vector to an existing dense-only collection.
+
+        Qdrant >= 1.18 exposes ``PUT /collections/{name}/vectors/{vector_name}``
+        (client: ``create_vector_name``) which extends a live collection's
+        vector schema without a recreate. ``update_collection`` does NOT work
+        for this — it answers 400 "Not existing vector name" — which is the
+        trap that made an earlier version of this code claim the migration was
+        impossible.
+
+        Returns ``True`` when the schema now declares the sparse vector (so
+        the caller can activate hybrid), ``False`` when the server is too old
+        or the call is refused. Never raises: a schema change that fails must
+        degrade to dense-only, not take the provider down.
+        """
+        from qdrant_client.http import models as _m
+
+        try:
+            self._client.create_vector_name(
+                collection_name=self._collection,
+                vector_name=SPARSE_VECTOR_NAME,
+                vector_name_config=_m.SparseVectorNameConfig(
+                    sparse=_m.SparseVectorConfig(
+                        modifier=sparse_vector_params().modifier
+                    )
+                ),
+            )
+        except Exception as e:
+            logger.debug("hybrid: create_vector_name refused (%s)", e)
+            return False
+        # Confirm from the server, not from the call's return value.
+        try:
+            info = self._client.get_collection(self._collection)
+            declared = info.config.params.sparse_vectors or {}
+            return SPARSE_VECTOR_NAME in declared
+        except Exception as e:
+            logger.debug("hybrid: could not confirm sparse schema (%s)", e)
+            return False
 
     def system_prompt_block(self) -> str:
         """Static info about Qdrant status for the system prompt."""
@@ -661,6 +847,53 @@ class QdrantMemoryProvider(MemoryProvider):
         )
 
     # -- Prefetch / Recall ---------------------------------------------------
+
+    def _query_points(self, dense_vec: list[float], query: str,
+                      query_filter: dict | None, limit: int) -> Any:
+        """Run recall: dense-only, or dense+bm25 RRF fusion when hybrid is on.
+
+        Any failure on the sparse arm — embedder missing, model not
+        loadable, a client too old for fusion — degrades to the plain dense
+        query with one warning: an optional arm must never take the
+        required one down. Qdrant >= 1.19 rejects prefetch without a
+        top-level query (``query=None``); ``FusionQuery`` IS that query.
+        """
+        if not self._hybrid_active:
+            return self._client.query_points(
+                collection_name=self._collection,
+                query=dense_vec,
+                using="dense",
+                query_filter=query_filter,
+                limit=limit,
+            )
+        try:
+            from qdrant_client.models import Fusion, FusionQuery, Prefetch
+            sparse_vec = self._embed_sparse(query)
+            return self._client.query_points(
+                collection_name=self._collection,
+                query=FusionQuery(fusion=Fusion.RRF),
+                prefetch=[
+                    Prefetch(query=dense_vec, using="dense"),
+                    Prefetch(query=sparse_vec, using=SPARSE_VECTOR_NAME),
+                ],
+                query_filter=query_filter,
+                limit=limit,
+            )
+        except EmbeddingError as e:
+            logger.warning(
+                "hybrid: sparse arm failed, falling back to dense-only: %s", e,
+            )
+        except ImportError as e:
+            logger.warning(
+                "hybrid: qdrant_client too old for fusion (%s), dense-only", e,
+            )
+        return self._client.query_points(
+            collection_name=self._collection,
+            query=dense_vec,
+            using="dense",
+            query_filter=query_filter,
+            limit=limit,
+        )
 
     @staticmethod
     def _dedup_hits(pairs: list[tuple[float, str]]) -> list[tuple[float, str]]:
@@ -704,6 +937,10 @@ class QdrantMemoryProvider(MemoryProvider):
 
         self._emit_progress("memory_sync", "💾 qdrant — retrieving...", verbose=True)
 
+        # Counted here, past the breaker: a breaker-skipped turn is not an
+        # attempt; a later failure still is (that turn got no usable recall).
+        self._recall_attempts += 1
+
         # Recall latency (0.1.8): nothing measured this before. Covers embed +
         # query + dedup — the whole search, i.e. the number the user waits for.
         t_recall = time.monotonic()
@@ -719,15 +956,15 @@ class QdrantMemoryProvider(MemoryProvider):
             # rejects ("Input should be a valid dictionary or instance of Prefetch").
             # NOTE 2: Qdrant >=1.19 rejects prefetch=... with query=None
             # ("A query is needed to merge the prefetches"). A single dense
-            # query is expressed by passing query= directly, not via prefetch.
-            results = self._client.query_points(
-                collection_name=self._collection,
-                query=dense_vec,
-                using="dense",
-                query_filter={
+            # query is expressed by passing query= directly; the hybrid path
+            # passes FusionQuery there instead (see _query_points).
+            results = self._query_points(
+                dense_vec,
+                query,
+                {
                     "must": [{"key": "session_id", "match": {"value": session_id}}]
                 } if session_id else None,
-                limit=10,
+                10,
             )
 
             hits = results.points if hasattr(results, "points") else []
@@ -748,6 +985,9 @@ class QdrantMemoryProvider(MemoryProvider):
             count = len(lines)
             self._last_recall_count = count
             self._last_recall_ms = recall_ms
+            self._recall_ms_window.append(recall_ms)
+            if count > 0:
+                self._recall_hits += 1
             self._note_status(last_recall=datetime.now(UTC).isoformat(),
                               last_recall_count=count)
             if count > 0:
@@ -815,8 +1055,10 @@ class QdrantMemoryProvider(MemoryProvider):
         {count} memories`` and the metrics belong there: ``provider_label`` is
         documented free text and interpolates verbatim, while ``glyph`` is a
         symbol field no peer overrides (the decision recorded in the 0.1.8
-        spec). Exactly two facts are added, at ``summary`` and above: how fast
-        (ms) and from where (collection). The count stays core's.
+        spec). Facts added at ``summary`` and above: how fast (ms), from where
+        (collection), and — once any recall has been attempted — the session
+        hit-rate ``hits N/M`` (N results, M attempts; process lifetime). The
+        count stays core's.
 
         At ``off`` — the default, and what every existing user has today — the
         returned label is byte-identical to 0.1.7: ``self.name``, no metrics,
@@ -832,6 +1074,10 @@ class QdrantMemoryProvider(MemoryProvider):
                 if ms
                 else f"{self.name} · {self._collection}"
             )
+            # The hit-rate segment waits for the first attempt: 0/0 is noise,
+            # exactly like the omitted-ms rule above.
+            if self._recall_attempts:
+                label += f" · hits {self._recall_hits}/{self._recall_attempts}"
         return RecallStatus(
             provider_label=label,
             count=self._last_recall_count,
@@ -879,12 +1125,21 @@ class QdrantMemoryProvider(MemoryProvider):
                 "source": "sync_turn",
                 "turn_author": turn_author,
             }
+            vector: dict[str, Any] = {"dense": dense_vec}
+            if self._hybrid_active:
+                try:
+                    vector[SPARSE_VECTOR_NAME] = self._embed_sparse(combined)
+                except EmbeddingError as e:
+                    # The memory is not optional; the sparse arm is.
+                    logger.warning(
+                        "hybrid: sparse embed failed, storing dense-only: %s", e,
+                    )
             self._client.upsert(
                 collection_name=self._collection,
                 points=[
                     {
                         "id": point_id,
-                        "vector": {"dense": dense_vec},
+                        "vector": vector,
                         "payload": payload,
                     }
                 ],
@@ -956,14 +1211,13 @@ class QdrantMemoryProvider(MemoryProvider):
             return f"qdrant_search: {e}"
 
         try:
-            results = self._client.query_points(
-                collection_name=self._collection,
-                query=dense_vec,
-                using="dense",
-                query_filter={
+            results = self._query_points(
+                dense_vec,
+                query,
+                {
                     "must": [{"key": "session_id", "match": {"value": session_id}}]
                 } if session_id else None,
-                limit=limit,
+                limit,
             )
             hits = results.points if hasattr(results, "points") else []
             # The point ID is printed so a specific memory can later be
@@ -994,11 +1248,19 @@ class QdrantMemoryProvider(MemoryProvider):
 
         try:
             point_id = str(uuid.uuid4())
+            vector: dict[str, Any] = {"dense": dense_vec}
+            if self._hybrid_active:
+                try:
+                    vector[SPARSE_VECTOR_NAME] = self._embed_sparse(text)
+                except EmbeddingError as e:
+                    logger.warning(
+                        "hybrid: sparse embed failed, storing dense-only: %s", e,
+                    )
             self._client.upsert(
                 collection_name=self._collection,
                 points=[{
                     "id": point_id,
-                    "vector": {"dense": dense_vec},
+                    "vector": vector,
                     "payload": {
                         "text": text[:2000],
                         "session_id": session_id,
@@ -1450,6 +1712,22 @@ class QdrantMemoryProvider(MemoryProvider):
                 "description": "Vector distance metric",
             },
             {
+                "key": "hybrid",
+                "label": "Hybrid Retrieval",
+                "type": "select",
+                "default": "off",
+                "choices": ["off", "on"],
+                "description": (
+                    "Dense + BM25 sparse search fused with RRF. A fresh "
+                    "collection declares the sparse vector at creation; an "
+                    "existing dense-only collection is migrated in place on "
+                    "the next initialize() (Qdrant >= 1.18 "
+                    "create_vector_name), after which run "
+                    "scripts/migrate_hybrid.py to backfill the existing "
+                    "points. Off (default) is dense-only."
+                ),
+            },
+            {
                 "key": "embedder",
                 "label": "Embedder",
                 "type": "select",
@@ -1548,6 +1826,34 @@ class QdrantMemoryProvider(MemoryProvider):
             raise
         self._embed_error = ""
         return vec
+
+    def _embed_sparse(self, text: str) -> Any:
+        """Encode `text` to the sparse (bm25) vector for hybrid search.
+
+        Lazy-loads fastembed's ``SparseTextEmbedding`` once per process
+        (10 MB model, cached after first download). Raises
+        ``EmbeddingRuntimeError`` carrying the underlying reason on every
+        failure path — callers decide what to do, and both write paths
+        choose to store dense-only rather than lose a memory.
+        """
+        if self._sparse_embedder is None:
+            try:
+                from fastembed import SparseTextEmbedding
+                self._sparse_embedder = SparseTextEmbedding(SPARSE_MODEL_NAME)
+            except Exception as e:
+                self._sparse_error = str(e)
+                raise EmbeddingRuntimeError(
+                    f"sparse embedder unavailable ({SPARSE_MODEL_NAME}): {e}"
+                ) from e
+        try:
+            from qdrant_client.models import SparseVector
+            sv = next(self._sparse_embedder.embed(text))
+            return SparseVector(
+                indices=sv.indices.tolist(), values=sv.values.tolist(),
+            )
+        except Exception as e:
+            self._sparse_error = str(e)
+            raise EmbeddingRuntimeError(f"sparse embed failed: {e}") from e
 
     # -- Model preparation and validation -------------------------------------
 
@@ -1804,9 +2110,16 @@ class QdrantMemoryProvider(MemoryProvider):
         if pairs:
             values = [score for score, _ in pairs]
             scores = f" (scores {min(values):.2f}–{max(values):.2f})"
+        window = ""
+        ordered = sorted(self._recall_ms_window)
+        if len(ordered) >= 2:
+            window = (
+                f" p50={_percentile(ordered, 50)}ms"
+                f" p95={_percentile(ordered, 95)}ms"
+            )
         logger.info(
-            "recall %d pts in %d ms%s session=%s collection=%s",
-            count, ms, scores, session_id or "-", self._collection,
+            "recall %d pts in %d ms%s%s session=%s collection=%s",
+            count, ms, scores, window, session_id or "-", self._collection,
         )
 
     def _log_store(self, count: int | None, ms: int, payload: dict) -> None:
@@ -1912,13 +2225,34 @@ class QdrantMemoryProvider(MemoryProvider):
             "vector_size": cfg.get("vector_size", self._vector_size),
             "distance": cfg.get("distance", self._distance),
             "progress": cfg.get("progress", self._progress_mode),
+            # Hybrid (0.1.9, opt-in): names its own states instead of
+            # collapsing "requested but impossible" into "off".
+            "hybrid": (
+                "on" if self._hybrid_active
+                else "off" if not self._hybrid_requested
+                else "inactive: collection has no sparse vector"
+                if self._initialized
+                else "pending initialization"
+            ),
             # display.level lives in qdrant.json, not in the flat provider
             # config, so it is resolved the same way recall_status() does —
             # one source of truth, and `hermes memory status` can answer
             # "what is this thing showing me?" for a fresh process.
             "display": display_level(self._hermes_home or None),
             "api_key": "(set)" if cfg.get("api_key") or self._api_key else "(unset)",
+            # Session metrics (0.1.9): honest zeros in a fresh process — these
+            # are process-lifetime counters, not persisted state.
+            "recall_attempts": self._recall_attempts,
+            "recall_hits": self._recall_hits,
+            "breaker_failures": self._breaker_failures,
+            "breaker_open": self._is_breaker_open(),
         }
+        # Latency percentiles only once a recall completed — an empty window
+        # omits the keys instead of reporting a fake 0 (the omitted-ms rule).
+        if self._recall_ms_window:
+            ordered = sorted(self._recall_ms_window)
+            display["recall_ms_p50"] = _percentile(ordered, 50)
+            display["recall_ms_p95"] = _percentile(ordered, 95)
         try:
             if self._status_json_path().exists():
                 state = _json.loads(self._status_json_path().read_text())

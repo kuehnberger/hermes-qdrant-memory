@@ -103,6 +103,37 @@ def test_non_object_config_falls_back(monkeypatch, tmp_path):
     assert mdsearch.configured_roots() == mdsearch.DEFAULT_ROOTS
 
 
+def test_key_is_not_reported_unknown_by_the_flat_config_sweep(
+    monkeypatch, tmp_path, caplog
+):
+    """``md_docs_roots`` is a documented key of qdrant.json, not a typo.
+
+    md_search reads it straight from the file, so the flat-provider sweep in
+    ``_load_plugin_config`` must neither warn about it (calling a working
+    setting "unknown" invites deletion) nor carry it as a provider knob.
+    Same rule as the ``display`` exemption in test_display_levels.
+    """
+    _write_config(
+        monkeypatch, tmp_path, {"md_docs_roots": {"skills": "/tmp/x"}}
+    )
+    # Config-file test: clear the env layer first — env outranks the file,
+    # and a CI host may export the vars this test must not see.
+    monkeypatch.delenv("QDRANT_URL", raising=False)
+    monkeypatch.delenv("QDRANT_API_KEY", raising=False)
+    import hermes_cli.config as _cfg
+    monkeypatch.setattr(_cfg, "load_config_readonly", lambda: {})
+    import logging as _logging
+
+    import plugins.memory.qdrant as mod
+    with caplog.at_level(_logging.WARNING,
+                         logger="hermes.plugins.memory.qdrant"):
+        merged = mod._load_plugin_config()
+    assert "md_docs_roots" not in merged, "it is not a provider knob"
+    assert not any(
+        "unknown config key" in r.getMessage() for r in caplog.records
+    ), "a documented key was reported as unknown"
+
+
 def test_configured_root_is_actually_walked(monkeypatch, tmp_path):
     """The override must reach ``iter_markdown``, not just the config view."""
     corpus = tmp_path / "exported-sessions"

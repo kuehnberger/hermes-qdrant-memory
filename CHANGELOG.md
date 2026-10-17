@@ -8,21 +8,48 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **`hybrid` — opt-in dense + BM25 sparse retrieval** (default `off`).
+  `"hybrid": "on"` in `qdrant.json` declares a `bm25` sparse vector (IDF
+  modifier), embeds every new memory both ways, and fuses the two rankings
+  with RRF at recall. A fresh collection declares the sparse vector at
+  creation; an **existing dense-only collection is migrated in place** —
+  the plugin adds the sparse vector itself (Qdrant >= 1.18
+  `create_vector_name`) and `scripts/migrate_hybrid.py` backfills the
+  existing points (resumable, dense vectors untouched). On a server older
+  than 1.18 it stays dense-only with one warning. Any sparse-arm failure
+  (embedder missing, model undownloadable) degrades to dense-only with a
+  warning — an optional arm can cost the improvement, never the memory and
+  never the recall. `hermes memory status` reports `on` / `off` /
+  `inactive`. Measured numbers, the collection rule, and a re-runnable
+  harness (`scripts/hybrid_eval.py`): `docs/HYBRID.md`.
+
 - **`display.level` — three display levels for the recall indicator**
   (`off` | `summary` | `verbose`, default `off`). Core renders the indicator
   as `{glyph} {provider_label} — recalled N memories`; at `summary` the
-  `provider_label` carries exactly two new facts, latency and collection:
-  `📖 qdrant · 41ms · hermes_memories — recalled 10 memories`. They live in
+  `provider_label` carries three facts — latency, collection, and (from the
+  first recall attempt on) the session hit-rate:
+  `📖 qdrant · 41ms · hermes_memories · hits 3/5 — recalled 10 memories`.
+  They live in
   `provider_label` because core documents it as free text and interpolates it
   verbatim, while `glyph` is a symbol field no peer overrides — the metrics
   must not go there. `verbose` keeps that same label and adds one numeric
   line per operation to `agent.log`: recall (points, ms, score range,
-  session, collection), store (points, ms, payload bytes, collection) and
+  p50/p95 over the rolling window once two recalls completed, session,
+  collection), store (points, ms, payload bytes, collection) and
   md_search (tier, ms, hit count, top file label, and the query you
   searched, echoed back — the only text any verbose line carries).
   Numbers and identifiers otherwise; no recalled message text, no snippets
   (rule c2). The count itself
   stays core's; it is never repeated in the label.
+- **Session metrics** — the summary label additionally carries a hit-rate
+  `hits N/M` once any recall has been attempted in the process (N results,
+  M attempts; a failed attempt counts, a breaker-skipped turn does not;
+  omitted until M > 0, never shown at `off`). `hermes memory status` reports
+  `recall_attempts`, `recall_hits`, `breaker_failures` and `breaker_open`
+  unconditionally, plus `recall_ms_p50`/`recall_ms_p95` over a rolling window
+  of completed recalls — percentiles are omitted while the window is empty
+  instead of printing a fake zero. All of it is process-lifetime state: a
+  fresh process reports honest zeros, not stale numbers.
 - The `md_search` tier decision and recall latency are no longer computed and
   discarded: the tier is recorded where it is decided, and the prefetch block
   is timed with `time.monotonic()`. Both surface only at `verbose`, so the
