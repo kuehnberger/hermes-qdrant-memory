@@ -2,43 +2,62 @@
 
 Measured 2026-10-19 on LongMemEval-S, 500 questions, 948 sessions seeded, top-10
 window, harness `2.0.0-result-boundary`, collection `hermes_memories_eval`. Each
-arm runs the live plugin end to end; the arms ran serially.
+arm drives the live plugin end to end; the arms ran serially.
 
 | arm | recall@1 | recall@5 | recall@10 | MRR | nDCG@5 |
 |---|---|---|---|---|---|
-| dense (default) | 0.170 | 0.472 | 0.598 | 0.308 | 0.291 |
-| `hybrid` | **0.430** | 0.676 | 0.768 | **0.535** | 0.522 |
-| `hybrid` + `temporal` | 0.430 | **0.682** | 0.768 | 0.533 | 0.521 |
-| `hybrid` + `temporal` + `rerank` | 0.430 | 0.680 | 0.764 | 0.534 | 0.522 |
+| dense (default) | 0.340 | 0.600 | 0.686 | 0.449 | 0.437 |
+| `hybrid` | **0.426** | 0.680 | **0.768** | 0.532 | 0.517 |
+| `hybrid` + `temporal` | 0.432 | 0.678 | 0.764 | 0.536 | 0.521 |
+| `hybrid` + `temporal` + `rerank` | **0.438** | 0.680 | **0.768** | **0.539** | **0.523** |
 
 ## Reading it honestly
 
-**Hybrid is the whole win.** recall@1 +26.0 points, recall@5 +20.4, MRR +0.227.
-Every other arm is inside the noise.
+**Hybrid is the large, clear win:** recall@1 0.340 -> 0.426 (+8.6 points),
+recall@10 0.686 -> 0.768 (+8.2), MRR 0.449 -> 0.532. This reproduces the figure
+already recorded in the CHANGELOG (0.340 -> 0.426, "+8.6 pts") exactly, on a
+freshly re-run harness. It is the number to publish.
 
-**`temporal` is neutral here, and that is not a verdict on the feature.**
+**`temporal` adds a small amount** — +0.006 recall@1, +0.004 MRR over hybrid.
 LongMemEval questions rarely carry an explicit time expression, so the window
-almost never fires. Judging temporal recall needs a corpus built for it; this
-run cannot.
+fires on a minority of them. The gain is real but small, and on n=500 a delta of
+0.006 is 3 questions. **Not evidence of harm, and not strong evidence of
+benefit** — judging temporal recall needs a corpus built for it.
 
-**`rerank` is neutral-to-slightly-negative.** This arm is not broken — the
-cross-encoder model downloads and demonstrably reorders candidates. The reason
-is structural: reranking PERMUTES a candidate set that retrieval already
-returned, so it can change rank but cannot add a hit that was never retrieved.
-On this data its ordering was marginally worse than RRF's, which is why
-`rerank` ships opt-in and **off by default**.
+**`rerank` adds a small amount** — +0.012 recall@1 over hybrid (0.426 -> 0.438),
++0.007 MRR. Same caveat: 6 questions on n=500, inside the noise band. It is a
+re-rank, so it can only permute candidates retrieval already returned and cannot
+add a hit that was never retrieved; that structural ceiling is why it ships
+opt-in and **off by default** despite the positive sign.
 
-## Known discrepancy — do not publish a dense figure yet
+**Nothing here justifies turning a knob on by default.** Hybrid earns it;
+temporal and rerank are defensible only on corpora that exercise them.
 
-This run measures dense recall@1 at 0.170; an earlier run recorded 0.340.
-Hybrid is stable across both (0.430 now vs 0.426 then). The dense gap is
-unresolved — most likely a different embedding model or eval-collection state.
-Reconcile before citing a dense baseline.
+## A contaminated run, recorded so it is not repeated
+
+The first attempt at this ablation produced dense recall@1 **0.170** and made
+temporal and rerank look useless or harmful. That run was WRONG.
+
+Cause, established with evidence: `hermes_memories_eval` already existed at the
+time (left over from earlier work), and `QdrantMemoryProvider.initialize()` only
+creates a collection when it is absent — so the FIRST arm inherited a stale
+collection, seeded into it, and queried a store polluted by leftover points.
+Every later arm created a fresh collection (the harness drops it at the end of
+each run), which is why only the first arm was affected. Re-running with the
+collection absent reproduced the recorded baseline exactly (0.340/0.600/0.686).
+
+The contaminated logs are kept at `~/.hermes/state/qd/ablation-run1-contaminated/`
+as the counter-example. `run_ablation.sh` now drops the eval collection before
+the first arm so a stale store cannot contaminate an arm again.
+
+**Lesson worth keeping: an eval arm that inherits pre-existing store state
+measures the store, not the arm.**
 
 ## Reproduce
 
 ```bash
 bash ~/.hermes/state/qd/run_ablation.sh          # serial, ~5 minutes
+FORCE=1 bash ~/.hermes/state/qd/run_ablation.sh  # re-run even if results exist
 python3 scripts/longmemeval_eval.py --hybrid --temporal   # a single arm
 ```
 
