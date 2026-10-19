@@ -18,15 +18,15 @@ The headline finding: **we are ahead on the properties that matter most**
 
 "Our" figures are re-measured by `scripts/check_docs_honesty.py` §1b on every
 run, so this table cannot silently go stale — see that script for the exact
-definition of each cell. Figures below re-measured 2026-10-18.
+definition of each cell. Figures below re-measured 2026-10-19.
 
 | | EntropicMem | Ours |
 |---|---|---|
-| Python lines | 13,604 (plugin) / ~32,500 (repo) | 4,376 (plugin, excl. tests and scripts) |
-| `__init__.py` | 1,693 | 2,351 |
+| Python lines | 13,604 (plugin) / ~32,500 (repo) | 7,549 (plugin, excl. tests and scripts) |
+| `__init__.py` | 1,693 | 2,913 |
 | Tools | 7 | 7 |
 | Hooks | 5 | 0 (the three no-op stubs were deleted 2026-09-29, cc5ee7d) |
-| Tests | 895 | 289 test functions / 5,421 lines of test code |
+| Tests | 895 | 539 test functions / 8,958 lines of test code |
 | CLI commands | 34 | 0 |
 | Screenshots | 5 | 0 (`docs/screenshots/README.md` is a capture plan, not shots) |
 | Eval harness | `evals/` with datasets + baselines | `scripts/retrieval_eval.py` (36 targets + 36 same-topic distractors; recall@k with 95% CI, MRR, nDCG@5, per-case decision margin) — **added 2026-10-02**, closing the gap this table recorded |

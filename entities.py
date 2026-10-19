@@ -53,6 +53,11 @@ Design rules
   same text always yields the same list, in order of first appearance.
 * **Conservative.** A miss only forgoes a boost; a false match can reorder a
   recall. Every guard above is therefore biased toward not extracting.
+* **Entity-to-entity matching.** A candidate that mentions a name only in a
+  form the extractor does not recognise -- a name written in lowercase prose --
+  is not matched. The alternative, substring matching against raw tokens, would
+  let a common word ("memory") boost every candidate that contains it; a miss
+  only forgoes a boost, and dense similarity already covers the lowercase case.
 * **Additive, bounded boost.** ``apply_entity_boost`` adds ``weight * overlap``
   to the fused score and sorts by the result. The weight is clamped to [0, 1]
   and the sort is stable, so a single entity mention cannot outrank a much
