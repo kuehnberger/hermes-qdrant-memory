@@ -183,6 +183,25 @@ def _points_of(response: Any) -> list:
     return list(getattr(response, "points", None) or [])
 
 
+def _archived_clause() -> dict:
+    """The clause that hides archived points from every recall.
+
+    The decay scan and the dedup merge mark a point instead of deleting it, so
+    the mark has to be honoured here or archiving would do nothing. Safe on a
+    store that has never been scanned: a point without the field is not a
+    ``match`` for ``archived: true``, so it stays visible.
+    """
+    return {"key": "archived", "match": {"value": True}}
+
+
+def _recall_filter(scope: dict | None = None) -> dict:
+    """The filter every recall path starts from: scope AND not-archived."""
+    must: list[dict] = []
+    if scope:
+        must.extend({"key": k, "match": {"value": v}} for k, v in scope.items())
+    return {"must": must, "must_not": [_archived_clause()]}
+
+
 def _and_filter(base: dict | None, clause: dict) -> dict:
     """AND one extra clause onto an existing filter dict."""
     must = list((base or {}).get("must") or [])
@@ -924,6 +943,14 @@ class QdrantMemoryProvider(MemoryProvider):
                     field_name="source",
                     field_schema="keyword",
                 )
+                # `archived` is on every recall filter (the decay scan and the
+                # dedup merge set it), so index it or every recall pays for an
+                # unindexed payload test.
+                self._client.create_payload_index(
+                    collection_name=self._collection,
+                    field_name="archived",
+                    field_schema="bool",
+                )
             except Exception as e:
                 logger.debug("Payload index creation: %s", e)
 
@@ -1320,11 +1347,8 @@ class QdrantMemoryProvider(MemoryProvider):
             # ("A query is needed to merge the prefetches"). A single dense
             # query is expressed by passing query= directly; the hybrid path
             # passes FusionQuery there instead (see _query_points).
-            query_filter = (
-                {
-                    "must": [{"key": "session_id", "match": {"value": session_id}}]
-                } if session_id else None
-            )
+            query_filter = _recall_filter(
+                {"session_id": session_id} if session_id else None)
             results = self._recall_query(dense_vec, query, query_filter, 10)
             hits = results.points if hasattr(results, "points") else []
 
@@ -1644,6 +1668,11 @@ class QdrantMemoryProvider(MemoryProvider):
             query_filter = build_qdrant_filter(spec, scope)
         except ValueError as e:
             return f"qdrant_search: invalid filters — {e}"
+        # Archived points stay out of every recall, user filters included.
+        query_filter = dict(query_filter or {})
+        query_filter["must_not"] = [
+            *(query_filter.get("must_not") or []), _archived_clause()
+        ]
 
         try:
             results = self._query_points(dense_vec, query, query_filter, limit)

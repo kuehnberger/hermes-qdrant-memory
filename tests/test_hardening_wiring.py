@@ -239,8 +239,14 @@ class TestPrefetchPlainFormat:
     ):
         provider, calls = _prefetchable(monkeypatch, {}, tmp_path, self.POINTS)
         provider.prefetch("morning coffee setup", session_id="sess-1")
+        # The archived exclusion rides on every recall filter: the decay scan
+        # and the dedup merge mark a point rather than deleting it, so the mark
+        # has to be honoured here or archiving would mean nothing. It is a no-op
+        # on a store that has never been scanned (a point without the field is
+        # not a match for archived: true).
         assert calls[0]["filter"] == {
-            "must": [{"key": "session_id", "match": {"value": "sess-1"}}]
+            "must": [{"key": "session_id", "match": {"value": "sess-1"}}],
+            "must_not": [{"key": "archived", "match": {"value": True}}],
         }
         assert calls[0]["limit"] == 10
 
@@ -694,7 +700,8 @@ class TestToolSearchFilters:
             "must": [
                 {"key": "session_id", "match": {"value": "s1"}},
                 {"key": "kind", "match": {"value": "turn"}},
-            ]
+            ],
+            "must_not": [{"key": "archived", "match": {"value": True}}],
         }
 
     def test_range_spec_reaches_query_points_as_a_range_clause(
@@ -713,7 +720,8 @@ class TestToolSearchFilters:
         _out, calls = self._search(monkeypatch, tmp_path,
                                    {"query": "coffee", "session_id": "s1"})
         assert calls[0]["filter"] == {
-            "must": [{"key": "session_id", "match": {"value": "s1"}}]
+            "must": [{"key": "session_id", "match": {"value": "s1"}}],
+            "must_not": [{"key": "archived", "match": {"value": True}}],
         }
 
     @pytest.mark.parametrize("spec", [
