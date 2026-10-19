@@ -33,6 +33,40 @@ opt-in and **off by default** despite the positive sign.
 **Nothing here justifies turning a knob on by default.** Hybrid earns it;
 temporal and rerank are defensible only on corpora that exercise them.
 
+## The `temporal` arm, measured on a corpus that CAN judge it
+
+LongMemEval cannot judge `temporal`: its questions rarely carry an explicit time
+expression, so the window almost never fires and the arm measures nothing.
+`scripts/temporal_probe.py` builds the corpus that can. 8 topics x 8 months = 64
+entries, all in ONE session (the only scope where the feature can act), with each
+topic's entries semantically near-identical so the DATE is the sole
+discriminator. Chance at recall@1 is 1/8 = 0.125.
+
+| arm | recall@1 | recall@5 | recall@10 | MRR |
+|---|---|---|---|---|
+| `temporal` off | 0.562 | 0.969 | 0.969 | 0.755 |
+| `temporal` on | **0.969** | 0.969 | 0.969 | **0.969** |
+| delta | **+0.406** | +0.000 | +0.000 | **+0.214** |
+
+Reproduced twice (MRR 0.755 / 0.758 — float noise only).
+
+Reading it honestly:
+
+- **When the query names a time, `temporal` is a large RANKING win** — recall@1
+  +40.6 points, MRR +0.214.
+- recall@5 and @10 were already at ceiling without it, so the gain is entirely
+  in ordering: it promotes the right month to rank 1. It does not retrieve
+  anything that was missing, and it cannot.
+- This corpus is built to make time the discriminator, so it is the **best case**
+  for the feature, not a naturalistic one. Real-world value tracks how often your
+  queries actually carry a time expression — rare in LongMemEval, plausibly
+  common in a personal assistant.
+- **Scope limits it.** `prefetch` filters recall to the current session, so
+  temporal reasoning operates WITHIN a session. It cannot reach across sessions,
+  and no setting changes that.
+- It is never harmful: with no time expression the window does not fire and the
+  arm is inert (see the LongMemEval table above, where the two arms agree).
+
 ## A contaminated run, recorded so it is not repeated
 
 The first attempt at this ablation produced dense recall@1 **0.170** and made
