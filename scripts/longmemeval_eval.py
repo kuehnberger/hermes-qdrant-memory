@@ -121,6 +121,7 @@ def run(
     hybrid: bool = False,
     misses_out: str | None = None,
     keep: bool = False,
+    knobs: dict | None = None,
 ) -> dict:
     # Same import pattern as retrieval_eval.py — tests/conftest.py sets up
     # the path so plugins.memory.qdrant resolves without hermes_yaml.
@@ -161,10 +162,22 @@ def run(
     provider._hybrid_requested = hybrid_requested(hybrid)
     provider.initialize("eval")
 
+    # Hardening knobs (opt-in, default off). Set on the INSTANCE exactly the way
+    # `hybrid` is, and AFTER initialize (which re-reads config and would
+    # otherwise overwrite them), so one arm of the ablation can be varied at a
+    # time without touching a config file.
+    active_knobs = {k: bool(v) for k, v in (knobs or {}).items()}
+    for name, enabled in active_knobs.items():
+        setattr(provider, f"_knob_{name}", enabled)
+    # A reranker built for a previous arm must not leak into this one.
+    provider._reranker = None
+
     data = load_longmemeval(LME_PATH)
     print(f"LongMemEval: {len(data)} examples")
     print(f"collection: {collection}  hybrid: {hybrid}  "
           f"harness: {HARNESS_VERSION}")
+    print("knobs: " + (", ".join(f"{k}={int(v)}" for k, v in
+                                 sorted(active_knobs.items())) or "(none)"))
 
     # Seed: ingest haystack sessions, track which point_ids are answer sessions
     print("seeding eval collection with haystack sessions...")
@@ -338,9 +351,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--misses-out", default=None, metavar="PATH",
                         help="dump ALL misses as JSONL to PATH")
     parser.add_argument("--keep", action="store_true")
+    # Hardening arms (opt-in, default off). Each maps to the provider knob of
+    # the same name, so `--temporal --rerank` measures hybrid+temporal+rerank.
+    parser.add_argument("--temporal", action="store_true",
+                        help="enable the temporal window + bucket spread")
+    parser.add_argument("--rerank", action="store_true",
+                        help="enable cross-encoder rerank (downloads its model)")
+    parser.add_argument("--entities", action="store_true",
+                        help="enable the heuristic entity boost")
+    parser.add_argument("--gate", action="store_true",
+                        help="enable the trivial-message gate")
+    parser.add_argument("--cascade", action="store_true",
+                        help="enable the recall degradation cascade")
     args = parser.parse_args(argv)
+    knobs = {
+        "temporal": args.temporal,
+        "rerank": args.rerank,
+        "entities": args.entities,
+        "gate": args.gate,
+        "cascade": args.cascade,
+    }
     run(collection=args.collection, hybrid=args.hybrid,
-        misses_out=args.misses_out, keep=args.keep)
+        misses_out=args.misses_out, keep=args.keep, knobs=knobs)
     return 0
 
 
