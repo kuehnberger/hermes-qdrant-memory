@@ -81,8 +81,18 @@ def _stub_query_points(monkeypatch, provider, points):
 
 
 def _prefetchable(monkeypatch, config, tmp_path, points, session_id=""):
-    """A provider with a stubbed embedder and query path, ready for prefetch."""
-    provider = QdrantMemoryProvider(config=config)
+    """A provider with a stubbed embedder and query path, ready for prefetch.
+
+    The base config is deliberately NON-EMPTY. ``QdrantMemoryProvider.__init__``
+    does ``config or _load_plugin_config()``, so an empty dict is FALSY and
+    falls through to the LIVE profile config — the test would then measure
+    whatever knobs the developer happens to have switched on. That is exactly
+    what broke the two "knob is off" tests the moment gate and ledger were
+    enabled for real. Merging over a non-empty base keeps the suite hermetic.
+    """
+    base = {"progress": "off", "collection": "test"}
+    base.update(config or {})
+    provider = QdrantMemoryProvider(config=base)
     provider._initialized = True
     provider._client = object()
     provider._hermes_home = str(tmp_path)
