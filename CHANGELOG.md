@@ -6,7 +6,54 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **`sync_turn` stored an ISO-8601 `timestamp` while the historical backfill
+  stored epoch floats.** Measured over 300 live points: 268 float, 28 missing,
+  4 ISO — and the 4 were exactly this path's writes. Qdrant range filters
+  accept numbers only, so every time-based query (temporal windows, decay
+  scoring) silently excluded them. `sync_turn` now writes a numeric epoch under
+  `timestamp`, keeps the readable form under `timestamp_iso`, and also writes
+  the `kind` field it previously omitted. Points written before this change are
+  read correctly (both formats are parsed) but are not rewritten.
+
 ### Added
+
+- **Six opt-in hardening knobs, all default `off`** so a default install
+  behaves exactly as before. Each is one key in `qdrant.json`; `hermes memory
+  status` reports each as `on`/`off` under `hardening`.
+  - **`gate`** — skip recall and storage for trivial messages (acknowledgements,
+    greetings, emoji-only). Saves an embedding and keeps the recall prompt free
+    of noise. Never skips a question, and word-boundary matched so `ok` cannot
+    fire inside `token`.
+  - **`temporal`** — parse a time expression out of the query ("last week",
+    "in 2023") and restrict recall to that window, spreading results across it
+    so a yearly question does not return six memories from one week. Points
+    with no timestamp are kept, and a window that matches nothing falls back to
+    the unfiltered order.
+  - **`rerank`** / **`rerank_model`** — rerank fused candidates with a small
+    ONNX cross-encoder (`Xenova/ms-marco-MiniLM-L-6-v2` by default). Downloads
+    its model on first use; every failure path degrades to the fused order.
+  - **`entities`** — heuristic, no-LLM re-rank by shared capitalised names and
+    code identifiers. A re-rank only: it never filters a candidate out.
+  - **`cascade`** — run recall through an ordered degradation (hybrid/dense ->
+    lexical) so a degraded recall is reported with its level and reason instead
+    of silently returning fewer results.
+  - **`ledger`** — a local SQLite ledger of per-point history and usage
+    (retrieval counts, Laplace-smoothed trust score) under the profile state
+    dir, never inside the plugin member dir.
+- **Metadata filter operators on `qdrant_search`** — a `filters` argument
+  supporting exact match, `eq/ne/in/nin/gt/gte/lt/lte/contains/icontains`,
+  `"*"` (key exists) and the logical `AND`/`OR`/`NOT`. The session scope is
+  always ANDed on top, so a filter can narrow a search but never widen it.
+  `contains`/`icontains` are Qdrant's tokenised full-text match, not substring
+  matching — the docstring says so plainly.
+- **`scripts/decay_scan.py`** — dry-run-first decay scanner
+  (`exp(-ln2 * age / half_life)`), exempting human-authored, pinned and
+  important points. `--apply` sets an `archived` payload flag and `--unarchive`
+  reverses it; nothing is ever deleted. Recall excludes archived points.
+- **`scripts/semantic_dedup.py`** — dry-run-first near-duplicate merge (cosine
+  >= 0.92). Refuses an unbounded scan: the clustering is O(n^2) in pure Python.
 
 - **`hybrid` — opt-in dense + BM25 sparse retrieval** (default `off`).
   `"hybrid": "on"` in `qdrant.json` declares a `bm25` sparse vector (IDF

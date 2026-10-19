@@ -102,7 +102,12 @@ _CAP_WORD = r"[A-Z][A-Za-z0-9]*"
 _SNAKE_ID = r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+"
 _HYPHEN_ID = r"[a-z][a-z0-9]*(?:-[a-z0-9]+)+"
 _DOTTED_ID = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+"
-_CAMEL_ID = r"[A-Za-z][a-z0-9]*(?:[A-Z][a-z0-9]+)+"
+#: A letter run containing at least one internal capital: ``entityOverlap``,
+#: ``QdrantMemoryProvider``, ``HTTPServer``. The first part may itself contain
+#: capitals (``HTTPServer`` -> one identifier, not the acronym ``HTTPS``), and
+#: the trailing part must end in lowercase so a plain acronym is left to
+#: :data:`_ACRONYM`.
+_CAMEL_ID = r"[A-Za-z][A-Za-z0-9]*(?:[A-Z][a-z0-9]+)+"
 _ACRONYM = r"[A-Z][A-Z0-9]+"
 _QUOTED = rf"[\"'`](?:[^\"'`\n]{{1,{_MAX_QUOTED_CHARS}}})[\"'`]"
 

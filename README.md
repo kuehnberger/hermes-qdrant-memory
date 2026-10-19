@@ -104,6 +104,30 @@ added in place and its old points backfilled with one command
 (`python scripts/migrate_hybrid.py --collection hermes_memories --yes`).
 Measured gain, honest limits, and a re-runnable harness: **`docs/HYBRID.md`**.
 
+## Optional: memory hardening (all default off)
+
+Six opt-in keys, each one line in `qdrant.json`. Default is `off` for every one,
+so an untouched install behaves exactly as before. `hermes memory status` reports
+each under `hardening`.
+
+| Key | What it buys |
+|---|---|
+| `gate` | Skips recall and storage for small talk — no embedding spent on "ok thanks". |
+| `temporal` | Understands "last week" / "in 2023" and spreads results across the window. |
+| `rerank` | Cross-encoder rerank of fused candidates (`rerank_model` to change it). |
+| `entities` | Re-ranks by shared names and code identifiers. Heuristic, no LLM. |
+| `cascade` | Ordered recall degradation, reported with its level and reason. |
+| `ledger` | Local per-point history and usage stats (retrieval counts, trust score). |
+
+`qdrant_search` also takes a `filters` argument (exact match, comparison
+operators, `contains`, and `AND`/`OR`/`NOT`); the session scope is always
+applied on top, so a filter narrows a search but never widens it.
+
+Two maintenance scripts ship with the same "dry run unless you say otherwise"
+rule: `scripts/decay_scan.py` (archive stale machine-generated points) and
+`scripts/semantic_dedup.py` (merge near-duplicates). Neither deletes anything —
+both set an `archived` flag that recall then honours, and both have an undo.
+
 ## Where the detail lives
 
 This file is the entry point. Everything else is in:

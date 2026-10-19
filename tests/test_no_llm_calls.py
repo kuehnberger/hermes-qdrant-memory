@@ -42,6 +42,18 @@ RUNTIME_MODULES = (
     "mdsearch.py",
     "mdsemantic.py",
     "tool_schemas.py",
+    # Rival-hardening modules (2026-10-19). They are imported by __init__.py at
+    # load time, so they ARE plugin runtime and the boundary must cover them:
+    # a future edit that reaches for a model inside one of these fails here,
+    # not in production.
+    "cascade.py",
+    "entities.py",
+    "filters.py",
+    "gate.py",
+    "history.py",
+    "hygiene.py",
+    "rerank.py",
+    "temporal.py",
 )
 
 #: LLM client libraries. None of these may appear in the plugin runtime.
