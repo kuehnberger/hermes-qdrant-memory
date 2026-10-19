@@ -1,4 +1,4 @@
-"""Heuristic entity extraction and entity-boosted recall (rival-hardening: Hindsight/Mem0 parity).
+"""Heuristic entity extraction and entity-boosted recall (rival-hardening).
 
 WHY THIS MODULE EXISTS
 ----------------------
@@ -42,10 +42,11 @@ MATCHING
 Entities are compared in normalised form: camelCase is split on its case
 boundaries and everything is lowercased, so ``QdrantMemoryProvider``,
 ``Qdrant Memory Provider`` and ``qdrant memory provider`` are one entity. A
-query entity counts as mentioned when it equals a text entity or one contains
-the other on a word boundary -- "New York" is mentioned by a memory about
-"New York City", and the reverse. Word boundaries are what keep "ai" from
-matching "email".
+query entity counts as mentioned when it appears in the text as a whole-word
+phrase -- "New York" is mentioned by a memory about "New York City" -- or when
+one of the text's own entities is contained in it, so a query about
+"New York City" is answered by a memory that says only "New York". Word
+boundaries are what keep "ok" out of "token" and "hi" out of "this".
 
 Design rules
 ------------
@@ -53,11 +54,10 @@ Design rules
   same text always yields the same list, in order of first appearance.
 * **Conservative.** A miss only forgoes a boost; a false match can reorder a
   recall. Every guard above is therefore biased toward not extracting.
-* **Entity-to-entity matching.** A candidate that mentions a name only in a
-  form the extractor does not recognise -- a name written in lowercase prose --
-  is not matched. The alternative, substring matching against raw tokens, would
-  let a common word ("memory") boost every candidate that contains it; a miss
-  only forgoes a boost, and dense similarity already covers the lowercase case.
+* **Whole-word, case-insensitive matching.** A query entity matches the text it
+  is written in, in any case and with any spacing, so a memory that mentions a
+  name in lowercase still earns the boost. Matching is on word boundaries, never
+  substrings: "ok" does not match "token", and "hi" does not match "this".
 * **Additive, bounded boost.** ``apply_entity_boost`` adds ``weight * overlap``
   to the fused score and sorts by the result. The weight is clamped to [0, 1]
   and the sort is stable, so a single entity mention cannot outrank a much
@@ -104,6 +104,11 @@ _MAX_QUOTED_CHARS = 120
 # words), and the quoted family comes last because a quote is not a word
 # character and so can never win earlier.
 _CAP_WORD = r"[A-Z][A-Za-z0-9]*"
+#: A capitalised run: one capitalised word, or several in a row. The leading
+#: ``\b`` is what makes this a *token* rule -- ``iOS`` is one token, so the ``OS``
+#: inside it is not a second entity, while ``Alice`` after a space or a
+#: punctuation mark is.
+_CAP_RUN = rf"\b{_CAP_WORD}(?:[ \t]+{_CAP_WORD})*"
 _SNAKE_ID = r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+"
 _HYPHEN_ID = r"[a-z][a-z0-9]*(?:-[a-z0-9]+)+"
 _DOTTED_ID = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+"
@@ -113,7 +118,10 @@ _DOTTED_ID = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+"
 #: the trailing part must end in lowercase so a plain acronym is left to
 #: :data:`_ACRONYM`.
 _CAMEL_ID = r"[A-Za-z][A-Za-z0-9]*(?:[A-Z][a-z0-9]+)+"
-_ACRONYM = r"[A-Z][A-Z0-9]+"
+#: A standalone all-caps token (``API``, ``BM25``, ``QDRANT``). The leading
+#: ``\b`` is what keeps ``iOS`` from yielding the acronym ``OS``: ``O`` is not a
+#: token start there.
+_ACRONYM = r"\b[A-Z][A-Z0-9]+"
 _QUOTED = rf"[\"'`](?:[^\"'`\n]{{1,{_MAX_QUOTED_CHARS}}})[\"'`]"
 
 _ENTITY_RE = re.compile(
@@ -124,7 +132,7 @@ _ENTITY_RE = re.compile(
             rf"(?P<hyphen>{_HYPHEN_ID})",
             rf"(?P<camel>{_CAMEL_ID})",
             rf"(?P<acronym>{_ACRONYM})",
-            rf"(?P<cap>{_CAP_WORD}(?:[ \t]+{_CAP_WORD})*)",
+            rf"(?P<cap>{_CAP_RUN})",
             rf"(?P<quoted>{_QUOTED})",
         )
     )
@@ -247,18 +255,18 @@ def _contains(haystack: str, needle: str) -> bool:
     return re.search(rf"\b{re.escape(needle)}\b", haystack) is not None
 
 
-def _mentioned(entity: str, present: set[str]) -> bool:
-    """True when ``entity`` is named by any of the ``present`` entities.
+def _mentioned(entity: str, haystack: str, present: set[str]) -> bool:
+    """True when ``entity`` is named by ``haystack`` or by one of ``present``.
 
-    Equality, or containment in either direction: a query about "New York" is
-    answered by a memory about "New York City", and a query about the longer
-    name is answered by the shorter one. Word boundaries keep "ai" from
-    matching "email" and "art" from matching "particle".
+    The haystack is the whole text in normalised form, so a mention in any case
+    or spacing counts; ``present`` is the text's own entity set, which adds the
+    one direction the haystack cannot: a query about "New York City" is answered
+    by a memory that says only "New York". Word boundaries keep "ok" out of
+    "token" and "hi" out of "this" and "history".
     """
-    for other in present:
-        if entity == other or _contains(other, entity) or _contains(entity, other):
-            return True
-    return False
+    if _contains(haystack, entity):
+        return True
+    return any(entity == other or _contains(entity, other) for other in present)
 
 
 def entity_overlap(query_entities: Sequence[str], text: str) -> float:
@@ -277,10 +285,11 @@ def entity_overlap(query_entities: Sequence[str], text: str) -> float:
     wanted.discard("")
     if not wanted:
         return 0.0
+    haystack = _normalize(text)
     present = {_normalize(entity) for entity in extract_entities(text)}
-    if not present:
-        return 0.0
-    matched = sum(1 for entity in wanted if _mentioned(entity, present))
+    matched = sum(
+        1 for entity in wanted if _mentioned(entity, haystack, present)
+    )
     return matched / len(wanted)
 
 
@@ -321,4 +330,4 @@ def apply_entity_boost(
         for score, text in pairs
     ]
     ranked.sort(key=lambda item: item[0], reverse=True)
-    return [(score, text) for _boosted, score, text in ranked]
+    return [(boosted, text) for boosted, _score, text in ranked]
