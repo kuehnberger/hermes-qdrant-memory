@@ -309,7 +309,12 @@ class TestQdrantConfigSchemaContract:
         fields = _normalize_memory_provider_schema("qdrant", qdrant_provider)
         assert {f["key"] for f in fields} == {
             "url", "api_key", "collection", "vector_size", "distance",
-            "embedder", "model", "device", "progress", "hybrid"}
+            "embedder", "model", "device", "progress", "hybrid",
+            # Rival-hardening knobs (2026-10-19). This set is the contract that
+            # the dashboard normalizer keeps EVERY declared field, so a new
+            # schema entry must be added here in the same change.
+            "gate", "temporal", "rerank", "rerank_model", "entities",
+            "cascade", "ledger"}
 
     def test_secret_field_declares_env_var(self, qdrant_provider):
         """Secrets route to .env through the field's env_var, not a config key."""

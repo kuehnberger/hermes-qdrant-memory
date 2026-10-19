@@ -35,6 +35,20 @@ QDRANT_SEARCH_SCHEMA = {
                 "description": "Maximum number of results (default 10)",
                 "default": 10,
             },
+            "filters": {
+                "type": "object",
+                "description": (
+                    "Optional metadata filter over the stored payload "
+                    "(session_id, source, kind, timestamp, text). Exact match "
+                    "by default; operators are eq, ne, in, nin, gt, gte, lt, "
+                    "lte, contains, icontains, '*' (key exists), and the "
+                    "logical AND/OR/NOT whose values are lists of specs. "
+                    "Example: a spec of kind=assistant, source in "
+                    "[cli, tui], and timestamp >= 1790000000. "
+                    "The session scope is always applied on top, so a filter "
+                    "can narrow a search but never widen its scope."
+                ),
+            },
         },
         "required": ["query"],
     },

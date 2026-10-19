@@ -23,8 +23,11 @@ and IS live when ``hybrid: on`` is set.
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import logging
 import re
+import sys
 import time
 import uuid
 from collections import deque
@@ -67,8 +70,73 @@ model_cache_locations = _embedder.model_cache_locations
 model_is_present = _embedder.model_is_present
 pinned_cache_dir = _embedder.pinned_cache_dir
 
-logger = logging.getLogger("hermes.plugins.memory.qdrant")
 
+def _load_sibling(name: str, alias: str) -> Any:
+    """Import a sibling module under BOTH load modes.
+
+    Same problem ``embedder`` solves above: this package loads as
+    ``plugins.memory.qdrant`` (relative import works) and as a bare top-level
+    ``__init__`` (no parent package, so a relative import raises). Fall back to
+    loading the file by path in that case.
+    """
+    # 1. Already imported under the package — the normal path, and what the
+    #    test bootstrap pre-imports. Reuse it so there is exactly ONE module
+    #    object per file; a second copy loaded by path would make isinstance()
+    #    and module-level constants disagree across the two paths.
+    candidates = [alias]
+    if __package__:
+        candidates.insert(0, f"{__package__}.{name}")
+    for candidate in candidates:
+        if candidate in sys.modules:
+            return sys.modules[candidate]
+    # 2. Relative import when this module has a parent package.
+    if __package__:
+        try:
+            return importlib.import_module(f".{name}", __package__)
+        except ImportError:
+            pass
+    # 3. By-path load, for the bare top-level import the plugin loader uses.
+    #    Registered in sys.modules BEFORE exec: a module loaded by path is not
+    #    in sys.modules, and @dataclass (cascade.CascadeResult) looks its own
+    #    module up there and raises AttributeError when it is absent.
+    import os
+
+    spec = importlib.util.spec_from_file_location(
+        alias, os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{name}.py")
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot locate sibling {name}.py") from None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[alias] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(alias, None)
+        raise
+    return module
+
+
+# The rival-hardening siblings (2026-10-19). Importing them changes no
+# behaviour: each is opt-in at its call site, and all are pure stdlib.
+_gate = _load_sibling("gate", "hermes_qdrant_gate")
+_temporal = _load_sibling("temporal", "hermes_qdrant_temporal")
+_entities = _load_sibling("entities", "hermes_qdrant_entities")
+_rerank = _load_sibling("rerank", "hermes_qdrant_rerank")
+_cascade = _load_sibling("cascade", "hermes_qdrant_cascade")
+_filters = _load_sibling("filters", "hermes_qdrant_filters")
+_history = _load_sibling("history", "hermes_qdrant_history")
+
+is_social_closer = _gate.is_social_closer
+should_skip_recall = _gate.should_skip_recall
+should_skip_store = _gate.should_skip_store
+parse_time_window = _temporal.parse_time_window
+bucket_spread = _temporal.bucket_spread
+build_qdrant_filter = _filters.build_qdrant_filter
+validate_filter_spec = _filters.validate_filter_spec
+run_cascade = _cascade.run_cascade
+MemoryLedger = _history.MemoryLedger
+
+logger = logging.getLogger("hermes.plugins.memory.qdrant")
 # Ceiling on a model-supplied `limit`. A tool argument is not a human budget:
 # an accidental `limit=100000` on qdrant_recall scrolls the whole collection
 # into memory and bills the caller one enormous response, and on qdrant_search
@@ -93,6 +161,59 @@ _POINT_ID_RE = re.compile(
 
 def _is_valid_point_id(value: str) -> bool:
     return bool(_POINT_ID_RE.match(value))
+
+
+class _Points:
+    """Minimal stand-in for a Qdrant response.
+
+    ``run_cascade`` speaks lists of points; ``QdrantClient.query_points``
+    returns an object carrying ``.points``. This adapter keeps the cascade
+    ignorant of the client's response type so cascade.py stays importable
+    without qdrant_client.
+    """
+
+    __slots__ = ("points",)
+
+    def __init__(self, points: list) -> None:
+        self.points = points
+
+
+def _points_of(response: Any) -> list:
+    """The point list of a Qdrant response, or [] for anything unexpected."""
+    return list(getattr(response, "points", None) or [])
+
+
+def _and_filter(base: dict | None, clause: dict) -> dict:
+    """AND one extra clause onto an existing filter dict."""
+    must = list((base or {}).get("must") or [])
+    must.append(clause)
+    return {"must": must}
+
+
+def _payload_epoch(payload: dict | None) -> float | None:
+    """Best-effort numeric timestamp from a point payload.
+
+    The store carries TWO formats and one absence — measured 2026-10-19 over
+    300 live points: 268 epoch floats (the backfill's format), 28 missing
+    (~9%), 4 ISO strings (written by the live ``sync_turn`` path). Qdrant range
+    filters accept numbers only, so every time comparison must normalise first.
+    Absent or unparseable returns None, never 0.0: a 0.0 would sort as 1970 and
+    silently win every "oldest" comparison.
+    """
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("timestamp")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            stamp = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+            return stamp.timestamp()
+        except ValueError:
+            return None
+    return None
 
 
 def _clamp_limit(raw: object, default: int, ceiling: int) -> int:
@@ -338,7 +459,9 @@ def _load_plugin_config() -> dict:
     # project 50 silently-ignored config keys (mnemosyne issue #482). The
     # warning makes the mistake visible; the drop keeps behaviour honest to it.
     known = {"collection", "vector_size", "distance", "url", "api_key",
-             "embedder", "model", "device", "progress", "hybrid"}
+             "embedder", "model", "device", "progress", "hybrid",
+             "gate", "temporal", "rerank", "rerank_model", "entities",
+             "cascade", "ledger"}
     unknown = sorted(set(merged) - known)
     if unknown:
         logger.warning(
@@ -415,6 +538,35 @@ def hybrid_requested(raw: object) -> bool:
     logger.warning(
         "memory.qdrant: hybrid: unrecognized value %r — treating as off "
         "(valid: on/off)", raw,
+    )
+    return False
+
+
+#: The rival-hardening knobs (2026-10-19). Every one defaults OFF so a default
+#: install behaves exactly like 0.1.8 — the same recall, the same writes, the
+#: same bytes. ``hybrid`` set that precedent and these follow it.
+HARDENING_KNOBS = ("gate", "temporal", "rerank", "entities", "cascade", "ledger")
+
+
+def knob_enabled(raw: object, *, name: str = "knob") -> bool:
+    """Parse an opt-in hardening knob. Off unless clearly truthy.
+
+    Shares ``hybrid``'s truthy table so a YAML ``on`` (parsed as bool True) and
+    a JSON ``"on"`` (a string) land in the same place. An unrecognized value
+    warns once and resolves OFF: a typo must never enable a feature.
+    """
+    if isinstance(raw, bool):
+        return raw
+    if raw is None:
+        return False
+    text = str(raw).strip().lower()
+    if text in _HYBRID_TRUTHY:
+        return True
+    if text in _HYBRID_FALSY:
+        return False
+    logger.warning(
+        "memory.qdrant: %s: unrecognized value %r — treating as off "
+        "(valid: on/off)", name, raw,
     )
     return False
 
@@ -589,6 +741,24 @@ class QdrantMemoryProvider(MemoryProvider):
         # empty so _state_home() resolves it from the environment). It decides
         # where qdrant.json / qdrant-status.json live — never the plugin dir.
         self._hermes_home: str = ""
+
+        # Rival-hardening knobs (2026-10-19). All opt-in, all default off; see
+        # HARDENING_KNOBS. Read once here so a config change needs a restart,
+        # exactly like `hybrid`.
+        cfg = self._config
+        self._knob_gate = knob_enabled(cfg.get("gate"), name="gate")
+        self._knob_temporal = knob_enabled(cfg.get("temporal"), name="temporal")
+        self._knob_rerank = knob_enabled(cfg.get("rerank"), name="rerank")
+        self._knob_entities = knob_enabled(cfg.get("entities"), name="entities")
+        self._knob_cascade = knob_enabled(cfg.get("cascade"), name="cascade")
+        self._knob_ledger = knob_enabled(cfg.get("ledger"), name="ledger")
+        # Cross-encoder rerank: built lazily on first use, never at import.
+        self._reranker: Any = None
+        # Usage ledger (opt-in). Lives OUTSIDE the plugin member dir: a file
+        # that changes on every recall inside the member dir would re-hash the
+        # venv stamp on every launch. Opened on first use, closed in shutdown().
+        self._ledger: Any = None
+        self._ledger_error: str = ""
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -895,6 +1065,187 @@ class QdrantMemoryProvider(MemoryProvider):
             limit=limit,
         )
 
+    def _recall_query(self, dense_vec: list[float], query: str,
+                      query_filter: dict | None, limit: int) -> Any:
+        """Run the recall query, through the degradation cascade when enabled.
+
+        With ``cascade`` off this is exactly ``_query_points`` — the 0.1.8
+        path, unchanged. With it on, the same call becomes the strongest level
+        of an ordered cascade, so a degraded recall is REPORTED (level, reason)
+        instead of silently returning fewer results.
+        """
+        if not self._knob_cascade:
+            return self._query_points(dense_vec, query, query_filter, limit)
+
+        strongest = "hybrid" if self._hybrid_active else "dense"
+        def _strongest() -> list:
+            return _points_of(
+                self._query_points(dense_vec, query, query_filter, limit))
+
+        levels = [
+            (strongest, _strongest),
+            ("lexical", lambda: self._lexical_points(query, query_filter, limit)),
+        ]
+        result = run_cascade(
+            levels,
+            on_error=lambda name, exc: logger.warning(
+                "recall cascade: %s level failed: %s", name, exc),
+        )
+        if result.degraded:
+            logger.warning("recall cascade: degraded to %r (%s)",
+                           result.level, result.reason)
+        return _Points(result.points)
+
+    def _text_index_present(self) -> bool:
+        """Whether the collection declares a full-text index on ``text``.
+
+        The lexical level can only be served through Qdrant's ``match.text``,
+        which needs that index. Building one on a large store is a real cost,
+        so this level is offered when the index is already there and skipped
+        (visibly, in the cascade's reason) when it is not.
+        """
+        try:
+            info = self._client.get_collection(self._collection)
+            schema = getattr(info, "payload_schema", None) or {}
+            entry = schema.get("text")
+            data_type = str(getattr(entry, "data_type", entry)).lower()
+            return entry is not None and "text" in data_type
+        except Exception:
+            return False
+
+    def _lexical_points(self, query: str, query_filter: dict | None,
+                        limit: int) -> list:
+        """Last-resort lexical level: a full-text match on the stored text."""
+        if not self._text_index_present():
+            logger.debug(
+                "recall cascade: no full-text index on 'text' — lexical skipped")
+            return []
+        try:
+            points, _next = self._client.scroll(
+                collection_name=self._collection,
+                scroll_filter=_and_filter(query_filter,
+                                          {"key": "text", "match": {"text": query}}),
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+            )
+            return list(points or [])
+        except Exception as e:
+            logger.debug("recall cascade: lexical scroll failed: %s", e)
+            return []
+
+    def _apply_temporal_window(
+        self,
+        cands: list[tuple[float, str, str, float | None]],
+        window: tuple[float | None, float | None],
+    ) -> list[tuple[float, str, str, float | None]]:
+        """Restrict to the parsed time window, then spread across it.
+
+        Relevance-first inside the window (the incoming score order is kept),
+        then at most a couple of hits per time bucket, so "what happened in
+        2023" does not return six memories from the same week.
+
+        Two deliberate leniencies. Candidates with NO timestamp are kept rather
+        than dropped: ~9% of the store has none, and silently losing them would
+        be a recall regression wearing a feature's clothes. And when the window
+        matches nothing at all the unfiltered order is returned, so a misparse
+        costs ranking quality, never the whole recall.
+        """
+        start, end = window
+        unknown = [c for c in cands if c[3] is None]
+        in_window = [
+            c for c in cands
+            if c[3] is not None
+            and (start is None or c[3] >= start)
+            and (end is None or c[3] < end)
+        ]
+        if not in_window:
+            logger.debug("recall: temporal window matched nothing — unfiltered order")
+            return cands
+        spread = bucket_spread([(c[0], c[3], c) for c in in_window], start, end)
+        return [item[2] for item in spread] + unknown
+
+    def _apply_entity_stage(
+        self,
+        cands: list[tuple[float, str, str, float | None]],
+        query: str,
+    ) -> list[tuple[float, str, str, float | None]]:
+        """Re-rank by entity overlap with the query.
+
+        A re-rank, never a filter: an entity-poor candidate keeps its score and
+        simply moves down. The boosted score is used for ORDER only — the chat
+        line keeps showing the fused score, so the number a user sees still
+        means the same thing as it does without this knob.
+        """
+        query_entities = _entities.extract_entities(query)
+        if not query_entities:
+            return cands
+        ordered = _entities.apply_entity_boost(
+            [(c[0], c[1]) for c in cands], query_entities)
+        first_by_text: dict[str, tuple[float, str, str, float | None]] = {}
+        for cand in cands:
+            first_by_text.setdefault(cand[1], cand)
+        return [first_by_text[t] for _s, t in ordered if t in first_by_text]
+
+    def _apply_rerank_stage(
+        self,
+        cands: list[tuple[float, str, str, float | None]],
+        query: str,
+    ) -> list[tuple[float, str, str, float | None]]:
+        """Reorder by a cross-encoder score (opt-in).
+
+        Reranker returns CROSS-ENCODER scores, which are not the fused scores
+        the chat line displays, so only the ORDER is taken. Every failure path
+        inside Reranker returns its input unchanged, and this wrapper catches
+        anything it does not — an optional arm must never take recall down.
+        """
+        if self._reranker is None:
+            self._reranker = _rerank.Reranker(
+                self._config.get("rerank_model") or _rerank.DEFAULT_MODEL)
+        try:
+            reranked = self._reranker.rerank(query, [(c[0], c[1]) for c in cands])
+        except Exception as e:
+            logger.warning("rerank: stage failed, keeping fused order: %s", e)
+            return cands
+        first_by_text: dict[str, tuple[float, str, str, float | None]] = {}
+        for cand in cands:
+            first_by_text.setdefault(cand[1], cand)
+        return [first_by_text[t] for _s, t in reranked if t in first_by_text]
+
+    def _get_ledger(self) -> Any:
+        """Open the usage ledger on first use, OUTSIDE the plugin member dir.
+
+        A file that changes on every recall inside the member dir re-hashes the
+        venv stamp on every launch (``pm.workspace.members_stamp`` walks the
+        member dir), which turns each `hermes` start into a dependency re-sync.
+        The ledger therefore lives under the profile's state dir.
+        """
+        if self._ledger is not None:
+            return self._ledger
+        if self._ledger_error:
+            return None
+        try:
+            path = _state_home(self._hermes_home or None) / "qdrant-memory-ledger.db"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._ledger = MemoryLedger(path)
+        except Exception as e:
+            self._ledger_error = str(e)[:200]
+            logger.warning("ledger: cannot open the usage ledger: %s", e)
+            return None
+        return self._ledger
+
+    def _note_retrieval(self, point_ids: list[str]) -> None:
+        """Record one recall of these points in the usage ledger (opt-in)."""
+        if not self._knob_ledger:
+            return
+        ledger = self._get_ledger()
+        if ledger is None:
+            return
+        try:
+            ledger.bump_retrieval([i for i in point_ids if i])
+        except Exception as e:
+            logger.debug("ledger: retrieval bump failed: %s", e)
+
     @staticmethod
     def _dedup_hits(pairs: list[tuple[float, str]]) -> list[tuple[float, str]]:
         """Drop later hits that substantially repeat an earlier one.
@@ -935,6 +1286,17 @@ class QdrantMemoryProvider(MemoryProvider):
             logger.debug("Circuit breaker open — skipping prefetch")
             return ""
 
+        # Trivial-message gate (opt-in). Sits ahead of the embedder so small
+        # talk never costs a model call or pollutes the recall prompt. Records
+        # a zero recall rather than leaving the previous turn's count showing.
+        if self._knob_gate and should_skip_recall(query):
+            logger.debug("gate: trivial message — recall skipped")
+            self._last_recall_count = 0
+            self._last_recall_ms = None
+            self._note_status(last_recall=datetime.now(UTC).isoformat(),
+                              last_recall_count=0)
+            return ""
+
         self._emit_progress("memory_sync", "💾 qdrant — retrieving...", verbose=True)
 
         # Counted here, past the breaker: a breaker-skipped turn is not an
@@ -958,29 +1320,62 @@ class QdrantMemoryProvider(MemoryProvider):
             # ("A query is needed to merge the prefetches"). A single dense
             # query is expressed by passing query= directly; the hybrid path
             # passes FusionQuery there instead (see _query_points).
-            results = self._query_points(
-                dense_vec,
-                query,
+            query_filter = (
                 {
                     "must": [{"key": "session_id", "match": {"value": session_id}}]
-                } if session_id else None,
-                10,
+                } if session_id else None
             )
-
+            results = self._recall_query(dense_vec, query, query_filter, 10)
             hits = results.points if hasattr(results, "points") else []
-            pairs: list[tuple[float, str]] = []
+
+            # Candidates carry id and timestamp alongside score and text: the
+            # temporal stage needs the timestamp and the usage ledger needs the
+            # id, and neither can be recovered from the text afterwards.
+            cands: list[tuple[float, str, str, float | None]] = []
             for pt in hits:
                 payload = pt.payload if hasattr(pt, "payload") else {}
-                score = pt.score if hasattr(pt, "score") else 0.0
                 text = payload.get("text", "")
-                if text:
-                    pairs.append((score, text))
-            pairs = self._dedup_hits(pairs)
+                if not text:
+                    continue
+                cands.append((
+                    float(pt.score) if hasattr(pt, "score") else 0.0,
+                    text,
+                    str(getattr(pt, "id", "") or ""),
+                    _payload_epoch(payload),
+                ))
+
+            # Dedup still runs on the 0.1.8 (score, text) shape — same
+            # thresholds, same survivors — then the kept texts are mapped back
+            # so id and timestamp ride along. setdefault keeps the FIRST
+            # occurrence, which is the one _dedup_hits kept.
+            kept = self._dedup_hits([(s, t) for s, t, _i, _ts in cands])
+            first_by_text: dict[str, tuple[float, str, str, float | None]] = {}
+            for cand in cands:
+                first_by_text.setdefault(cand[1], cand)
+            cands = [first_by_text[t] for _s, t in kept if t in first_by_text]
+
+            # --- opt-in hardening stages. Each is a strict no-op when its knob
+            # is off, so a default install runs the 0.1.8 path exactly. ---
+            if self._knob_temporal:
+                window = parse_time_window(query)
+                if window is not None:
+                    cands = self._apply_temporal_window(cands, window)
+            if self._knob_entities:
+                cands = self._apply_entity_stage(cands, query)
+            if self._knob_rerank:
+                cands = self._apply_rerank_stage(cands, query)
+
+            pairs = [(s, t) for s, t, _i, _ts in cands]
             # Stop the clock here: everything after is formatting. Captured on
             # the success path only — a failed recall has no timing to show,
             # which is why the except branch clears _last_recall_ms.
             recall_ms = int((time.monotonic() - t_recall) * 1000)
             lines = [f"- [{score:.2f}] {text}" for score, text in pairs]
+
+            # Usage ledger (opt-in): one local write recording that these
+            # points were surfaced. Best-effort — bookkeeping must never cost
+            # the recall it is bookkeeping for.
+            self._note_retrieval([i for _s, _t, i, _ts in cands])
 
             count = len(lines)
             self._last_recall_count = count
@@ -1104,6 +1499,12 @@ class QdrantMemoryProvider(MemoryProvider):
             logger.debug("Circuit breaker open — skipping sync_turn")
             return
 
+        # Trivial-message gate (opt-in): an acknowledgement is not a memory,
+        # and storing it costs an embedding plus permanent store space.
+        if self._knob_gate and should_skip_store(f"{user}\n{assistant}"):
+            logger.debug("gate: trivial turn — store skipped")
+            return
+
         self._emit_progress("memory_sync", "💾 qdrant — storing turn...", verbose=True)
 
         t0 = time.monotonic()
@@ -1113,7 +1514,14 @@ class QdrantMemoryProvider(MemoryProvider):
             dense_vec = self._embed(combined)
 
             point_id = str(uuid.uuid4())
-            timestamp = datetime.now(UTC).isoformat()
+            # NUMERIC epoch, not ISO. The backfill wrote epoch floats while
+            # this path wrote ISO strings, so the store carried two formats at
+            # once and Qdrant range filters — temporal windows, decay scoring —
+            # accept numbers only. Measured 2026-10-19 over 300 points: 268
+            # float, 28 missing, 4 ISO, and the 4 were exactly this path's
+            # writes. The ISO form is kept beside it for readability.
+            now = datetime.now(UTC)
+            timestamp = now.timestamp()
 
             # The payload is built once and reused: the upsert stores it, and
             # display.level=verbose reports its serialized size — so the number
@@ -1122,6 +1530,10 @@ class QdrantMemoryProvider(MemoryProvider):
                 "text": combined[:2000],  # Truncate for storage
                 "session_id": session_id,
                 "timestamp": timestamp,
+                "timestamp_iso": now.isoformat(),
+                # `kind` used to be absent here, leaving these points invisible
+                # to a kind-filtered query while every backfilled point had one.
+                "kind": "turn",
                 "source": "sync_turn",
                 "turn_author": turn_author,
             }
@@ -1151,6 +1563,15 @@ class QdrantMemoryProvider(MemoryProvider):
                 last_store=datetime.now(UTC).isoformat(),
                 last_store_ms=store_ms,
             )
+            # Usage ledger (opt-in): the point's first history entry, so a
+            # later recall can be attributed to something.
+            if self._knob_ledger:
+                ledger = self._get_ledger()
+                if ledger is not None:
+                    try:
+                        ledger.record_event(point_id, "add", combined[:200])
+                    except Exception as e:
+                        logger.debug("ledger: add event failed: %s", e)
 
             # Get the total point count for the progress message
             try:
@@ -1210,15 +1631,22 @@ class QdrantMemoryProvider(MemoryProvider):
             # detail — that is the silent-degradation trap this replaced.
             return f"qdrant_search: {e}"
 
+        # Metadata filter operators (rival-hardening). Additive by design: the
+        # scope clause is ANDed in by build_qdrant_filter, and no caller passed
+        # a `filters` argument before, so behaviour without it is unchanged.
+        scope = {"session_id": session_id} if session_id else None
+        spec = args.get("filters")
+        if spec is not None:
+            problems = validate_filter_spec(spec, scope)
+            if problems:
+                return "qdrant_search: invalid filters — " + "; ".join(problems)
         try:
-            results = self._query_points(
-                dense_vec,
-                query,
-                {
-                    "must": [{"key": "session_id", "match": {"value": session_id}}]
-                } if session_id else None,
-                limit,
-            )
+            query_filter = build_qdrant_filter(spec, scope)
+        except ValueError as e:
+            return f"qdrant_search: invalid filters — {e}"
+
+        try:
+            results = self._query_points(dense_vec, query, query_filter, limit)
             hits = results.points if hasattr(results, "points") else []
             # The point ID is printed so a specific memory can later be
             # targeted by qdrant_forget. Without it, forgetting is impossible
@@ -1646,6 +2074,14 @@ class QdrantMemoryProvider(MemoryProvider):
     # -- Shutdown ------------------------------------------------------------
 
     def shutdown(self) -> None:
+        # Release the usage ledger's SQLite handle (opt-in feature; a no-op
+        # when it was never opened).
+        if self._ledger is not None:
+            try:
+                self._ledger.close()
+            except Exception as e:
+                logger.debug("ledger: close failed: %s", e)
+            self._ledger = None
         """Close Qdrant client connection."""
         if self._client is not None:
             try:
@@ -1774,6 +2210,88 @@ class QdrantMemoryProvider(MemoryProvider):
                     "Progress display for memory operations. 'off' shows nothing. "
                     "'minimal' shows completion events (stored, recalled N). "
                     "'verbose' also shows start events (storing..., retrieving...)."
+                ),
+            },
+            # Rival-hardening knobs (2026-10-19). All default OFF, so a default
+            # install keeps 0.1.8 behaviour exactly. Each names what it buys.
+            {
+                "key": "gate",
+                "label": "Trivial-message gate",
+                "type": "select",
+                "default": "off",
+                "choices": ["off", "on"],
+                "description": (
+                    "Skip recall and storage for small talk (acknowledgements, "
+                    "greetings, emoji-only). Saves an embedding and keeps the "
+                    "recall prompt free of noise. Never skips a question."
+                ),
+            },
+            {
+                "key": "temporal",
+                "label": "Temporal recall",
+                "type": "select",
+                "default": "off",
+                "choices": ["off", "on"],
+                "description": (
+                    "Parse a time expression out of the query ('last week', "
+                    "'in 2023') and restrict recall to that window, spreading "
+                    "results across it. Points with no timestamp are kept, and "
+                    "a window that matches nothing falls back to the full order."
+                ),
+            },
+            {
+                "key": "rerank",
+                "label": "Cross-encoder rerank",
+                "type": "select",
+                "default": "off",
+                "choices": ["off", "on"],
+                "description": (
+                    "Rerank fused recall candidates with a small ONNX "
+                    "cross-encoder. Downloads its model on first use and "
+                    "degrades silently to the fused order on any failure."
+                ),
+            },
+            {
+                "key": "rerank_model",
+                "label": "Rerank model",
+                "type": "string",
+                "default": "Xenova/ms-marco-MiniLM-L-6-v2",
+                "description": "Cross-encoder checkpoint used when rerank is on.",
+            },
+            {
+                "key": "entities",
+                "label": "Entity boost",
+                "type": "select",
+                "default": "off",
+                "choices": ["off", "on"],
+                "description": (
+                    "Heuristic (no LLM, no NER model): re-rank candidates that "
+                    "share capitalised names or code identifiers with the "
+                    "query. A re-rank only — it never filters results out."
+                ),
+            },
+            {
+                "key": "cascade",
+                "label": "Recall degradation cascade",
+                "type": "select",
+                "default": "off",
+                "choices": ["off", "on"],
+                "description": (
+                    "Run recall through an ordered cascade (hybrid/dense -> "
+                    "lexical) so a degraded recall is reported with its level "
+                    "and reason instead of silently returning less."
+                ),
+            },
+            {
+                "key": "ledger",
+                "label": "Usage ledger",
+                "type": "select",
+                "default": "off",
+                "choices": ["off", "on"],
+                "description": (
+                    "Keep a local SQLite ledger of per-point history and usage "
+                    "(retrieval counts, trust score) under the profile state "
+                    "dir. Adds one small local write per recall."
                 ),
             },
         ]
@@ -2246,6 +2764,21 @@ class QdrantMemoryProvider(MemoryProvider):
             "recall_hits": self._recall_hits,
             "breaker_failures": self._breaker_failures,
             "breaker_open": self._is_breaker_open(),
+            # Rival-hardening state (2026-10-19). Reports each knob as it was
+            # actually read, plus the ledger's health — a ledger that cannot be
+            # opened must be visible here, not silently absent.
+            "hardening": {
+                "gate": "on" if self._knob_gate else "off",
+                "temporal": "on" if self._knob_temporal else "off",
+                "rerank": "on" if self._knob_rerank else "off",
+                "entities": "on" if self._knob_entities else "off",
+                "cascade": "on" if self._knob_cascade else "off",
+                "ledger": (
+                    "on" if self._ledger is not None
+                    else f"unavailable: {self._ledger_error}" if self._ledger_error
+                    else "on" if self._knob_ledger else "off"
+                ),
+            },
         }
         # Latency percentiles only once a recall completed — an empty window
         # omits the keys instead of reporting a fake 0 (the omitted-ms rule).
