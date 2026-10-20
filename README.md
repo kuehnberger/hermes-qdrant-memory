@@ -4,6 +4,24 @@
 backed by [Qdrant](https://qdrant.tech). No cloud dependency, no embedding API key, no
 per-query cost. Your data stays on your machine.
 
+## How it works
+
+```mermaid
+flowchart TD
+    A["Agent turn<br/>(user + assistant)"] --> B["Local ONNX embedder<br/>384-dim, CPU-only"]
+    B --> C[("Qdrant collection<br/>hermes_memories")]
+    C --> D["Session-scoped recall<br/>dense vector search + session_id filter"]
+    D --> E["Verbatim memories<br/>quoted, not summarized"]
+
+    F["qdrant_search"] --> D
+    G["qdrant_upsert"] --> B
+    H["qdrant_recall"] --> C
+    I["qdrant_collect"] --> C
+    J["qdrant_prepare"] --> B
+    K["qdrant_forget"] --> C
+    L["md_search"] --> M[("Local markdown<br/>FTS5 + embeddings")]
+```
+
 ## What it does
 
 Your agent's memory is a Qdrant collection you run yourself. Each turn is embedded
