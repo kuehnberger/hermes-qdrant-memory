@@ -35,18 +35,29 @@ description: "**Local-first**, self-hostable Qdrant vector-memory backend for He
 requires_hermes: ">=0.21.4"       # parses under _VERSION_COMPARATOR_RE
 
 # NOT pip_dependencies — that key is silently dropped by parse_manifest_file().
-# BOTH embedder backends are declared, not just the default. 'fastembed' (ONNX
-# Runtime, CPU-only) is the default because it measured 287 MB peak RSS against
-# sentence-transformers' 2,191 MB; 'sentence-transformers' stays a supported,
-# configurable option for machines with a GPU or RAM to spare. torch itself is
-# deliberately NOT declared: it is transitive via sentence-transformers, and
-# ~5.3 GB in a CUDA build is not ours to pin. Keep torch in a dev venv — the
-# backend-parity tests need it; a runtime venv may drop it entirely.
+#
+# RUNTIME deps only — what the DEFAULT backend needs. 'fastembed' (ONNX Runtime,
+# CPU-only) is the default because it measured 287 MB peak RSS against
+# sentence-transformers' 2,191 MB, so fastembed + qdrant-client are the whole
+# runtime footprint.
+#
+# 'sentence-transformers' is deliberately NOT listed here even though the plugin
+# supports it as a configurable backend for GPU/RAM-rich hosts. The manifest key
+# means "the plugin needs this to run", and the loader enforces that reading on
+# EVERY discovery in EVERY environment that loads the plugin: measured
+# 2026-10-23, listing it produced ~15,300 identical WARNING lines in ten days
+# ("Plugin qdrant declares Python dependencies that are not installed:
+# sentence-transformers>=2.7.0,<7") because the PM generation venv carries
+# qdrant-client + fastembed but not the optional backend. That noise reads as a
+# broken plugin and cost another profile a misdiagnosis.
+# The backend's DECLARED INSTALL PATH is the `gpu` extra in pyproject.toml
+# (`pip install 'hermes-plugin-qdrant[gpu]'`), which the dependency-footprint
+# tests in tests/test_tree_rules.py guard. torch stays transitive there on
+# purpose: ~5.3 GB in a CUDA build is not ours to pin.
 # 1.10.0 is the oldest floor with query_points + Prefetch + FusionQuery.
 python_dependencies:
   - "qdrant-client>=1.10.0,<2"
   - "fastembed>=0.4.0,<1"
-  - "sentence-transformers>=2.7.0,<7"
 
 requires_env: []                  # a LOCAL default means no env gate
 optional_env:
