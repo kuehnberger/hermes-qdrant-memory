@@ -158,7 +158,8 @@ Documented here so nobody has to read the source to find out:
   (`sync_turn(..., session_id=...)`, and `session_id` is a *required* parameter of
   `qdrant_recall`), so there is no session state to rebind and nothing to flush at a session
   boundary. `on_pre_compress` would be a real addition — a digest point written before the
-  transcript is discarded — and is not built.
+  transcript is discarded. Shipped: it writes an idempotent `kind: checkpoint` point,
+  excluded from recall via `must_not`, fail-closed (see CHANGELOG [Unreleased]).
 - **INT8 scalar quantization** exists in `_backend.py` but is *not wired into the provider* —
   the provider talks to `QdrantClient` directly. Hybrid dense+sparse RRF search is NOT in this
   list: it is wired and opt-in (see `HYBRID.md`).

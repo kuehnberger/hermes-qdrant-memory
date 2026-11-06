@@ -69,6 +69,13 @@ All notable changes to this project are documented here. The format is based on
   never the recall. `hermes memory status` reports `on` / `off` /
   `inactive`. Measured numbers, the collection rule, and a re-runnable
   harness (`scripts/hybrid_eval.py`): `docs/HYBRID.md`.
+- **`on_pre_compress` lifecycle hook — snapshots the pre-compression session** as an
+  idempotent `ckpt::<session_id>` point stamped `kind: checkpoint` (zero vector, no recalled
+  text), so compression no longer silently loses the session tail. It is excluded from
+  recall by a `must_not` clause in `_recall_filter` (alongside the existing archived
+  exclusion) and is fail-closed: a store failure drops the checkpoint, never the compression.
+  Covered by `tests/test_on_pre_compress.py` (8 tests); the existing provider suite still
+  passes unchanged (`tests/test_qdrant_provider.py`, 117 passed / 8 skipped, 1 warning).
 
 - **`display.level` — three display levels for the recall indicator**
   (`off` | `summary` | `verbose`, default `off`). Core renders the indicator

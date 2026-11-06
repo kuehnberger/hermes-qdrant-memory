@@ -194,12 +194,26 @@ def _archived_clause() -> dict:
     return {"key": "archived", "match": {"value": True}}
 
 
+def _checkpoint_clause() -> dict:
+    """Hides compression-checkpoint points from every recall.
+
+    ``on_pre_compress`` snapshots the pre-compression session as a point with
+    ``kind: checkpoint`` and no verbatim text, so it is recoverable but never
+    resurfaces in recall. Excluding by ``kind`` here means that snapshot can
+    never pollute a vector search or scroll — the only paths that build on
+    ``_recall_filter``. Existing points are unaffected: no checkpoint points
+    exist until the feature is exercised, so this is a pure exclusion.
+    """
+    return {"key": "kind", "match": {"value": "checkpoint"}}
+
+
 def _recall_filter(scope: dict | None = None) -> dict:
-    """The filter every recall path starts from: scope AND not-archived."""
+    """The filter every recall path starts from: scope AND not-archived AND
+    not a compression checkpoint."""
     must: list[dict] = []
     if scope:
         must.extend({"key": k, "match": {"value": v}} for k, v in scope.items())
-    return {"must": must, "must_not": [_archived_clause()]}
+    return {"must": must, "must_not": [_archived_clause(), _checkpoint_clause()]}
 
 
 def _and_filter(base: dict | None, clause: dict) -> dict:
@@ -717,6 +731,9 @@ class QdrantMemoryProvider(MemoryProvider):
         self._breaker_failures = 0
         self._initialized = False
         self._prefetch_thread: Any = None
+        # Last session we stored into; read by on_pre_compress() so a
+        # compression-checkpoint point is attributable to its session.
+        self._last_session_id: str = ""
         # Last real backend probe result ("" = unknown/ok, else a message).
         # Only set by check_backend()/initialize(); never guessed.
         self._backend_error: str = ""
@@ -1518,6 +1535,8 @@ class QdrantMemoryProvider(MemoryProvider):
         """Store the turn's content as a memory point in Qdrant."""
         if not self._initialized or not self._client:
             return
+        if session_id:
+            self._last_session_id = session_id
 
         if self._is_breaker_open():
             logger.debug("Circuit breaker open — skipping sync_turn")
@@ -2099,6 +2118,61 @@ class QdrantMemoryProvider(MemoryProvider):
     def backup_paths(self) -> list[str]:
         """Paths outside HERMES_HOME for hermes backup/import (none for Qdrant)."""
         return []
+
+    # -- Lifecycle: compression checkpoint -----------------------------------
+    def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
+        """Snapshot the pre-compression session before the transcript is trimmed.
+
+        Hermes calls this as the bridge to the next session, right before it
+        compresses the conversation. We write ONE checkpoint point keyed by the
+        session (``ckpt::<session_id>``) so the call is idempotent: re-compressing
+        the same session overwrites the previous checkpoint instead of
+        duplicating it. The point carries ``kind: checkpoint`` and no verbatim
+        text, and ``_recall_filter`` excludes that kind, so the snapshot is
+        recoverable (e.g. via qdrant_search with an explicit kind filter) but
+        can never leak into normal recall.
+
+        Returns ``""``: this hook persists state, it does not contribute extra
+        text to the compressor. Never raises — a failed checkpoint must not
+        block compression.
+        """
+        session_id = self._last_session_id
+        if not session_id:
+            # No session to attribute the checkpoint to; nothing idempotent to
+            # write. Fail closed.
+            return ""
+        point_id = f"ckpt::{session_id}"
+        vector: dict[str, Any] = {"dense": [0.0] * self._vector_size}
+        if self._hybrid_active:
+            # Empty sparse = zero vector; never embed a checkpoint (the store is
+            # side-effect only, and a failed embed must not break compression).
+            vector[SPARSE_VECTOR_NAME] = {"indices": [], "values": []}
+        now = datetime.now(UTC)
+        payload = {
+            "kind": "checkpoint",
+            "checkpoint": True,
+            "session_id": session_id,
+            "source": "on_pre_compress",
+            "turn_count": len(messages),
+            "timestamp": now.timestamp(),
+            "timestamp_iso": now.isoformat(),
+        }
+        try:
+            self._client.upsert(
+                collection_name=self._collection,
+                points=[
+                    {
+                        "id": point_id,
+                        "vector": vector,
+                        "payload": payload,
+                    }
+                ],
+                wait=True,
+            )
+        except Exception as e:
+            # Auxiliary snapshot: never surface a failure to the caller.
+            logger.warning("on_pre_compress: checkpoint store failed: %s", e)
+        return ""
 
     # -- Shutdown ------------------------------------------------------------
 
