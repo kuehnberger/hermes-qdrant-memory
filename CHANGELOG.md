@@ -54,6 +54,17 @@ All notable changes to this project are documented here. The format is based on
   reverses it; nothing is ever deleted. Recall excludes archived points.
 - **`scripts/semantic_dedup.py`** — dry-run-first near-duplicate merge (cosine
   >= 0.92). Refuses an unbounded scan: the clustering is O(n^2) in pure Python.
+- **`scripts/longmemeval_eval.py` — opt-in `--answer-accuracy` arm** that,
+  alongside recall@k, generates an answer from the retrieved context and judges
+  it YES/NO against the gold via an LLM judge, so comparisons with peers who
+  publish answer-accuracy (not only recall) are like-for-like. Off by default;
+  recall metrics and their numbers are unchanged when not requested. Lives in
+  `scripts/` (out of the no-LLM boundary); the judge is an injected `chat_fn`
+  and the deterministic core is unit-tested in `tests/test_answer_accuracy.py`
+  with stubs (no Qdrant/network). The live judge transport targets the local
+  lightproxy (`http://172.17.0.1:8088/v1`); that service is inactive on this
+  host, so a full measurement is a VPS run via `default`. No quotable number
+  is added here — a pilot (>=40 examples) is required before stating one.
 
 - **`hybrid` — opt-in dense + BM25 sparse retrieval** (default `off`).
   `"hybrid": "on"` in `qdrant.json` declares a `bm25` sparse vector (IDF

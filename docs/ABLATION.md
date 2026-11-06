@@ -98,3 +98,39 @@ python3 scripts/longmemeval_eval.py --hybrid --temporal   # a single arm
 Run it under the **hermes venv** — that is the interpreter with `datasets`; the
 repo venv does not have it. The dataset is staged at
 `~/.hermes/state/qdrant/eval-data/`, so no network is needed.
+
+## Answer-accuracy: the metric the comparison exposed
+
+The recall table above is a retrieval-only measurement. EntropicMem and other
+peers publish end-to-end **answer-accuracy** — an LLM judge scores whether an
+answer derived from retrieved context matches the gold — which is a different
+axis (index + generator + judge, not just the index). Printing "recall@10 0.768
+vs their 0.X" is a category error unless both axes are on the table.
+
+`scripts/longmemeval_eval.py` now has an opt-in `--answer-accuracy` arm
+(`scripts/answer_accuracy.py`) that, after the recall pass, does exactly the
+shared-generator + YES/NO-judge shape prescribed by the memory-retrieval-eval
+skill's head-to-head recipe:
+- take the top-10 retrieved point ids (rank order) from the recall pass;
+- fetch the SAME text payload the agent would actually receive via
+  `provider._client.retrieve` (not the rank-only line parse);
+- generate an answer from that context, then judge YES/NO against the gold;
+- report `answer_accuracy` + `exact_match` + `recall_at_1` together, so the
+  retrieval ceiling stays visible next to the generator/judge score.
+
+Off by default; the recall metrics and the published numbers above are
+unchanged when it is not requested. The judge is forced to a YES/NO reply
+(json_schema fails on most free `nous/*` models), and the deterministic core is
+unit-tested with stubs in `tests/test_answer_accuracy.py` — 14/14 in-process,
+no Qdrant/network.
+
+Honest scope and a hard non-claim:
+- No quotable number is added here. The published recall figures stand on their
+  own; an answer-accuracy figure would require a full judgment run.
+- The judge transport targets the local lightproxy
+  (`http://172.17.0.1:8088/v1`, no auth, `<provider>/<model>` form). That
+  service is **inactive** on this host (`hermes-meter-proxy.service` is dead), so
+  the transport is not smoke-tested here — only the pure logic is.
+- A corpus-scale pilot (>=40 examples on the LongMemEval 1,000-set, per the
+  memory-retrieval-eval skill) belongs on the VPS via `default` +
+  `heavy-run.sh`. Until then the arm is a measurement tool, not a result.

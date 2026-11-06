@@ -26,10 +26,10 @@ definition of each cell. Figures below re-measured 2026-10-22.
 | `__init__.py` | 1,693 | 2,913 |
 | Tools | 7 | 7 |
 | Hooks | 5 | 0 (the three no-op stubs were deleted 2026-09-29, cc5ee7d) |
-| Tests | 895 | 602 test functions / 9462 lines of test code |
+| Tests | 895 | 616 test functions / 9676 lines of test code |
 | CLI commands | 34 | 0 |
 | Screenshots | 5 | 0 (`docs/screenshots/README.md` is a capture plan, not shots) |
-| Eval harness | `evals/` with datasets + baselines | `scripts/retrieval_eval.py` (36 targets + 36 same-topic distractors; recall@k with 95% CI, MRR, nDCG@5, per-case decision margin) — **added 2026-10-02**, closing the gap this table recorded |
+| Eval harness | `evals/` with datasets + baselines | `scripts/retrieval_eval.py` (36 targets + 36 same-topic distractors; recall@k with 95% CI, MRR, nDCG@5, per-case decision margin) — **added 2026-10-02**, closing the gap this table recorded. `scripts/longmemeval_eval.py` adds an opt-in answer-accuracy arm (LLM judge, recall@k companion) — added 2026-10-27 |
 | Runtime install size | not measured | **206 MB**, zero torch (measured 2026-10-02) |
 
 A 34-command CLI is a **second user interface** layered on top of the tool
