@@ -1687,10 +1687,12 @@ class QdrantMemoryProvider(MemoryProvider):
             query_filter = build_qdrant_filter(spec, scope)
         except ValueError as e:
             return f"qdrant_search: invalid filters — {e}"
-        # Archived points stay out of every recall, user filters included.
+        # Archived + checkpoint points stay out of every recall, user filters included.
         query_filter = dict(query_filter or {})
         query_filter["must_not"] = [
-            *(query_filter.get("must_not") or []), _archived_clause()
+            *(query_filter.get("must_not") or []),
+            _archived_clause(),
+            _checkpoint_clause(),
         ]
 
         try:

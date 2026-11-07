@@ -68,7 +68,10 @@ FIXTURE_EXAMPLES = [
 # --- normalize_answer / exact_match ----------------------------------------
 
 def test_normalize_answer_collapses_whitespace_and_punctuation():
-    assert aa.normalize_answer("The Eiffel Tower, in Paris!") == "the eiffel tower in paris"
+    assert (
+        aa.normalize_answer("The Eiffel Tower, in Paris!")
+        == "the eiffel tower in paris"
+    )
     assert aa.normalize_answer("  'quoted'  ") == "quoted"
 
 

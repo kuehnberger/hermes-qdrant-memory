@@ -256,7 +256,10 @@ class TestPrefetchPlainFormat:
         # not a match for archived: true).
         assert calls[0]["filter"] == {
             "must": [{"key": "session_id", "match": {"value": "sess-1"}}],
-            "must_not": [{"key": "archived", "match": {"value": True}}],
+            "must_not": [
+                {"key": "archived", "match": {"value": True}},
+                {"key": "kind", "match": {"value": "checkpoint"}},
+            ],
         }
         assert calls[0]["limit"] == 10
 
@@ -711,7 +714,10 @@ class TestToolSearchFilters:
                 {"key": "session_id", "match": {"value": "s1"}},
                 {"key": "kind", "match": {"value": "turn"}},
             ],
-            "must_not": [{"key": "archived", "match": {"value": True}}],
+            "must_not": [
+                {"key": "archived", "match": {"value": True}},
+                {"key": "kind", "match": {"value": "checkpoint"}},
+            ],
         }
 
     def test_range_spec_reaches_query_points_as_a_range_clause(
@@ -731,7 +737,10 @@ class TestToolSearchFilters:
                                    {"query": "coffee", "session_id": "s1"})
         assert calls[0]["filter"] == {
             "must": [{"key": "session_id", "match": {"value": "s1"}}],
-            "must_not": [{"key": "archived", "match": {"value": True}}],
+            "must_not": [
+                {"key": "archived", "match": {"value": True}},
+                {"key": "kind", "match": {"value": "checkpoint"}},
+            ],
         }
 
     @pytest.mark.parametrize("spec", [

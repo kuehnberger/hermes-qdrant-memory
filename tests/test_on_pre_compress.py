@@ -9,8 +9,8 @@ importantly — that checkpoints are excluded from recall by construction.
 """
 
 from plugins.memory.qdrant import (
-    QdrantMemoryProvider,
     SPARSE_VECTOR_NAME,
+    QdrantMemoryProvider,
     _checkpoint_clause,
     _recall_filter,
 )

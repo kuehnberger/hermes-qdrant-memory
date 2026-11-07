@@ -18,7 +18,7 @@ import argparse
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def resolve_db(cli_db: str | None) -> str:
@@ -88,7 +88,8 @@ def run(args: argparse.Namespace) -> int:
         (win,),
     )
     by_prof = rows(
-        "SELECT coalesce(provider,'unknown') AS provider, SUM(tokens_in+tokens_out) AS tok,"
+        "SELECT coalesce(provider,'unknown') AS provider, "
+        "SUM(tokens_in+tokens_out) AS tok,"
         " SUM(cost_usd) AS cost, COUNT(*) AS calls"
         " FROM llm_calls WHERE ts >= datetime('now', ?)"
         " GROUP BY provider ORDER BY tok DESC",
@@ -105,7 +106,7 @@ def run(args: argparse.Namespace) -> int:
     cost = sum(r["cost_usd"] or 0 for r in runs)
     n_runs = len(runs)
     running = sum(1 for r in runs if r["status"] == "running")
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
     L = []
     L.append(f"# Hermes fleet usage — last {args.window_hours:g}h (to {now})")
@@ -132,7 +133,8 @@ def run(args: argparse.Namespace) -> int:
     for r in tools:
         rate = (100 * r["ok"] / r["total"]) if r["total"] else 0
         L.append(
-            f"| {r['tool_name']} | {r['ok']} | {r['total']} | {pct(r['ok'], r['total'])} |"
+            f"| {r['tool_name']} | {r['ok']} | {r['total']} | "
+            f"{pct(r['ok'], r['total'])} |"
         )
         if r["total"] and rate < 85:
             critique.append((r["tool_name"], r["ok"], r["total"], rate))
@@ -149,8 +151,9 @@ def run(args: argparse.Namespace) -> int:
     if critique:
         for name, ok, total, rate in sorted(critique, key=lambda x: x[3]):
             L.append(
-                f"- `{name}` at {rate:.0f}% ({ok}/{total}) — below the 85% success bar; "
-                f"review failure modes (e.g. consent-gated long calls, transient errors)."
+                f"- `{name}` at {rate:.0f}% ({ok}/{total}) — below the 85% "
+                f"success bar; review failure modes (e.g. consent-gated long "
+                f"calls, transient errors)."
             )
     else:
         L.append("- All tools at or above 85% success in this window.")
@@ -169,7 +172,11 @@ def run(args: argparse.Namespace) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--window-hours", type=float, default=24.0)
-    ap.add_argument("--out", default=None, help="write the report to this path instead of stdout")
+    ap.add_argument(
+        "--out",
+        default=None,
+        help="write the report to this path instead of stdout",
+    )
     ap.add_argument("--db", default=None, help="override the telemetry db path")
     return run(ap.parse_args())
 

@@ -43,7 +43,7 @@ import os
 import re
 import urllib.error
 import urllib.request
-from typing import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 # Local lightproxy base URL. Per hermes-memory-provider-plugin §LLM routing:
 # http://172.17.0.1:8088/v1, bearer ignored, model sent as <provider>/<model>.
@@ -237,8 +237,14 @@ def fetcher_from_provider(provider, collection: str):
         by_id: dict[str, str] = {}
         for pt in pts:
             pid = str(getattr(pt, "id", pt.get("id") if isinstance(pt, dict) else None))
-            payload = getattr(pt, "payload", None) or (pt.get("payload") if isinstance(pt, dict) else None) or {}
-            by_id[pid] = (payload.get("text") or "") if isinstance(payload, dict) else ""
+            payload = getattr(pt, "payload", None) or (
+                pt.get("payload") if isinstance(pt, dict) else None
+            ) or {}
+            by_id[pid] = (
+                (payload.get("text") or "")
+                if isinstance(payload, dict)
+                else ""
+            )
         return [by_id.get(i, "") for i in ids]
 
     return _fetch

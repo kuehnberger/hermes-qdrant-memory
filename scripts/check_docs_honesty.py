@@ -261,13 +261,23 @@ else:
             hooks_declared += 1
     # A hook the loader cannot see is the rule-6 mismatch in reverse, so count
     # what the CODE implements, not just what the manifest declares.
-    hooks_impl = len(
-        re.findall(
-            r"^\s*def (?:pre|post)_setup|^\s*def on_\w+\(",
-            read("__init__.py"),
-            re.M,
-        )
+    #
+    # Only PLUGIN hooks count here (those registered via ctx.register_hook in
+    # register()).  MemoryProvider lifecycle methods (on_pre_compress,
+    # on_session_*, on_turn_start, on_delegation, on_memory_write, ...) are
+    # called by MemoryManager, not by the plugin hook system, so a provider that
+    # overrides one of them is not "implementing a hook" in the loader sense.
+    # Counting them (the previous regex did) produced a false positive once the
+    # compression-checkpoint feature landed.
+    provider_lifecycle_methods = {
+        "on_delegation", "on_memory_write", "on_pre_compress",
+        "on_profile_created", "on_profile_renamed", "on_session_end",
+        "on_session_switch", "on_turn_start",
+    }
+    hook_defs = re.findall(
+        r"^\s*def ((?:pre|post)_\w+|on_\w+)\(", read("__init__.py"), re.M
     )
+    hooks_impl = sum(1 for name in hook_defs if name not in provider_lifecycle_methods)
     cli_commands = len(re.findall(r"add_parser\(", read("__init__.py")))
     # "Screenshots" means evidence of the tool WORKING, not any image in the
     # repo. `docs/banner.jpg` is a README banner asset and was the first thing
