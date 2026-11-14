@@ -18,18 +18,18 @@ The headline finding: **we are ahead on the properties that matter most**
 
 "Our" figures are re-measured by `scripts/check_docs_honesty.py` §1b on every
 run, so this table cannot silently go stale — see that script for the exact
-definition of each cell. Figures below re-measured 2026-10-19.
+definition of each cell. Figures below re-measured 2026-10-22.
 
 | | EntropicMem | Ours |
 |---|---|---|
-| Python lines | 13,604 (plugin) / ~32,500 (repo) | 7,558 (plugin, excl. tests and scripts) |
-| `__init__.py` | 1,693 | 2,913 |
+| Python lines | 13,604 (plugin) / ~32,500 (repo) | 7,751 (plugin, excl. tests and scripts) |
+| `__init__.py` | 1,693 | 2,989 |
 | Tools | 7 | 7 |
 | Hooks | 5 | 0 (the three no-op stubs were deleted 2026-09-29, cc5ee7d) |
-| Tests | 895 | 589 test functions / 9283 lines of test code |
+| Tests | 895 | 624 test functions / 9804 lines of test code |
 | CLI commands | 34 | 0 |
 | Screenshots | 5 | 0 (`docs/screenshots/README.md` is a capture plan, not shots) |
-| Eval harness | `evals/` with datasets + baselines | `scripts/retrieval_eval.py` (36 targets + 36 same-topic distractors; recall@k with 95% CI, MRR, nDCG@5, per-case decision margin) — **added 2026-10-02**, closing the gap this table recorded |
+| Eval harness | `evals/` with datasets + baselines | `scripts/retrieval_eval.py` (36 targets + 36 same-topic distractors; recall@k with 95% CI, MRR, nDCG@5, per-case decision margin) — **added 2026-10-02**, closing the gap this table recorded. `scripts/longmemeval_eval.py` adds an opt-in answer-accuracy arm (LLM judge, recall@k companion) — added 2026-10-27 |
 | Runtime install size | not measured | **206 MB**, zero torch (measured 2026-10-02) |
 
 A 34-command CLI is a **second user interface** layered on top of the tool

@@ -26,20 +26,23 @@ Interface:
     decay_score(age_days, half_life_days=180.0) -> float
     is_decay_exempt(payload, *, importance_threshold=0.7) -> bool
     cluster_near_duplicates(items, *, threshold=0.92) -> list[list]
+    cluster_by_neighbour_edges(edges, *, epochs, threshold=0.92) -> list[list[str]]
     merge_payloads(group) -> dict
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 __all__ = [
     "decay_score",
     "is_decay_exempt",
     "cluster_near_duplicates",
+    "plan_neighbour_dedup",
+    "DedupPlan",
     "merge_payloads",
 ]
 
@@ -244,6 +247,120 @@ def cluster_near_duplicates(
         for cluster in clusters
         if len(cluster) >= 2
     ]
+
+
+class DedupPlan(NamedTuple):
+    """Result of a neighbour-search dedup pass (see ``plan_neighbour_dedup``).
+
+    - ``survivors``:     point ids NOT marked superseded, newest-first.
+    - ``claimed``:       point ids marked superseded, in the order claimed.
+    - ``superseded_by``: mapping of each superseded id -> the kept neighbour
+                         that absorbed it (the newest centre listing it that
+                         was itself newer).
+    - ``groups``:        mapping of each kept centre -> the older ids it
+                         absorbed, in claim order — ready to feed
+                         ``merge_payloads``.
+    """
+
+    survivors: list
+    claimed: list
+    superseded_by: dict
+    groups: dict
+
+
+def _norm_epoch(epoch: float | None) -> float:
+    """Comparable epoch; None/NaN/inf collapse to -inf (treated as oldest).
+
+    The live store mixes epoch floats, ISO strings and absence, and every
+    "newest" rule here is numeric-only. A missing or unparseable stamp is
+    therefore the OLDEST possible: a centre with no usable timestamp can never
+    be strictly newer than anyone, so it claims nothing, and a neighbour with
+    none is claimable by any dated centre.
+    """
+    if epoch is None:
+        return float("-inf")
+    value = float(epoch)
+    return value if math.isfinite(value) else float("-inf")
+
+
+def plan_neighbour_dedup(
+    records: Iterable[tuple[str, float | None, Iterable[str]]],
+) -> DedupPlan:
+    """Plan a Qdrant neighbour-search dedup from per-point neighbour sets.
+
+    Pure counterpart to the ``--scalable`` path in
+    ``scripts/semantic_dedup.py``: where ``cluster_near_duplicates`` needs
+    every dense vector in memory at once (all-pairs, O(n^2)), this needs only
+    each point's ``id``, its epoch, and the ids Qdrant returned for a per-point
+    neighbour search at the similarity threshold. It never touches a vector,
+    so the caller can run a full-store pass without holding the store's
+    embeddings in RAM.
+
+    The rule, applied newest-first: a centre ``C`` claims a neighbour ``N`` as
+    superseded ONLY when ``N`` is strictly OLDER than ``C`` and not already
+    claimed. So the newest point in a near-duplicate run always survives and no
+    cycle can form — a newer point is never marked a duplicate of an older
+    centre. A centre that is itself already claimed is skipped, so a
+    superseded point does not go on to supersede others: the pass is the
+    direct-neighbour relation above threshold, NOT its transitive closure.
+
+    That non-transitivity is the one approximation versus exact all-pairs
+    clustering. It is safe at the high default threshold (0.92) — two points
+    each above threshold of a survivor are near-duplicates of it — and the
+    whole pass is reversible (the script's ``--unmerge`` clears the flags).
+
+    ``records`` is an iterable of ``(id, epoch, neighbours)``:
+
+    - ``id``         -> the point id (stringified);
+    - ``epoch``      -> its numeric timestamp, or None (counted as oldest; see
+                        ``_norm_epoch``);
+    - ``neighbours`` -> the ids a per-point ``query_points`` returned at the
+                        threshold for this centre. A neighbour newer than the
+                        centre is ignored. A neighbour whose epoch is unknown
+                        (absent from ``records``) is NOT claimed: the rule
+                        needs ``epoch(N) < epoch(C)``, which is unknowable for
+                        an unscanned point, and marking one could archive a
+                        newer point. In a full store scan every point is
+                        scrolled, so this case does not arise there.
+
+    Deterministic for a fixed input: the records are sorted newest-first, with
+    the stringified id as a stable tie-break, before processing.
+    """
+    loaded: list[tuple[str, float, list[str]]] = [
+        (str(pid), _norm_epoch(epoch), [str(n) for n in neigh])
+        for pid, epoch, neigh in records
+    ]
+    epoch_by_id = {pid: epoch for pid, epoch, _neigh in loaded}
+    # Newest first; a stable id tie-break keeps equal-epoch ties deterministic.
+    loaded.sort(key=lambda rec: rec[0])
+    loaded.sort(key=lambda rec: rec[1], reverse=True)
+
+    claimed: set[str] = set()
+    claimed_order: list[str] = []
+    superseded_by: dict[str, str] = {}
+    groups: dict[str, list[str]] = {}
+    for pid, epoch, neigh in loaded:
+        if pid in claimed:
+            continue
+        for neighbour in neigh:
+            if neighbour == pid or neighbour in claimed:
+                continue
+            neighbour_epoch = epoch_by_id.get(neighbour)
+            if neighbour_epoch is None:
+                continue  # unscanned point — epoch unknown, so never supersede
+            if neighbour_epoch < epoch:
+                claimed.add(neighbour)
+                claimed_order.append(neighbour)
+                superseded_by[neighbour] = pid
+                groups.setdefault(pid, []).append(neighbour)
+
+    survivors = [pid for pid, _epoch, _neigh in loaded if pid not in claimed]
+    return DedupPlan(
+        survivors=survivors,
+        claimed=claimed_order,
+        superseded_by=superseded_by,
+        groups=groups,
+    )
 
 
 # ---------------------------------------------------------------------------

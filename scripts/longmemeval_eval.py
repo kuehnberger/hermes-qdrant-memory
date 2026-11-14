@@ -12,11 +12,20 @@ v2.0.0 (2026-10-17) — result-boundary parser. v1.x parsed the search output
 LINE BY LINE, so a hit whose text spans dozens of lines was scored at the
 line number of its last line, not at its result rank; recall@5/@10 and the
 miss definition (``found_rank > 5``) were both wrong. v2 splits on result
-boundaries (lines matching ``^\\[score\\] \\(point_id\\)``, the exact format
+boundaries (lines matching ``^\\[score\\] \\((point_id)\\)``, the exact format
 ``_tool_search`` emits) and can dump every miss as JSONL with the full
 question, gold answer, gold session ids and retrieved point ids/ranks.
-"""
 
+v2.0.0-answer-accuracy — an opt-in ``--answer-accuracy`` arm that, after the
+recall pass, generates an answer from the retrieved context and judges it
+YES/NO against the gold (see scripts/answer_accuracy.py). It reports
+answer-accuracy alongside recall@k so comparisons against peers who publish
+answer-accuracy (not only recall) are like-for-like. Default OFF; the recall
+metrics and their numbers are unchanged when it is not requested. The judge
+transport targets the local lightproxy (http://172.17.0.1:8088/v1) and is NOT
+smoke-tested here (that service is inactive on this host) — the deterministic
+core (scripts/test_answer_accuracy.py) is verified in-process instead.
+"""
 from __future__ import annotations
 
 import argparse
@@ -29,6 +38,11 @@ from pathlib import Path
 from statistics import mean
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+import answer_accuracy  # noqa: E402  (answer-accuracy eval arm; out of plugins/ no-LLM scope)
+
 EVAL_COLLECTION = "hermes_memories_eval"
 SEARCH_LIMIT = 10
 SEED_WINDOW_CHARS = 2000
@@ -122,6 +136,7 @@ def run(
     misses_out: str | None = None,
     keep: bool = False,
     knobs: dict | None = None,
+    answer_accuracy_cfg: dict | None = None,
 ) -> dict:
     # Same import pattern as retrieval_eval.py — tests/conftest.py sets up
     # the path so plugins.memory.qdrant resolves without hermes_yaml.
@@ -144,7 +159,6 @@ def run(
                     "arm cannot run against it (use the deployed plugin)"
                 )
             return False
-
     # Construct from the LIVE plugin config (same as v1.x), guard against
     # the configured collection, then override collection + hybrid on the
     # instance. Passing the collection inside the config dict instead would
@@ -225,6 +239,9 @@ def run(
     ranks: list[int | None] = []
     latencies: list[float] = []
     miss_records: list[dict] = []
+    # Rank-ordered point_ids per example, captured so the answer-accuracy arm
+    # can fetch the same context the agent would actually receive.
+    retrieved_ids_per_example: list[list[str]] = []
 
     for i, ex in enumerate(data):
         question = ex.get("question", "")
@@ -240,6 +257,7 @@ def run(
         except Exception as e:
             print(f"  query failed for {i}: {e}")
             ranks.append(None)
+            retrieved_ids_per_example.append([])
             continue
 
         latency = (time.monotonic() - t1) * 1000
@@ -247,6 +265,7 @@ def run(
 
         # v2: parse by RESULT BOUNDARY, not by line.
         hits = parse_results(result) if isinstance(result, str) else []
+        retrieved_ids_per_example.append([h["point_id"] for h in hits])
         found_rank = None
         for hit in hits:
             if hit["point_id"] in answer_point_ids[i]:
@@ -286,6 +305,38 @@ def run(
         if (i + 1) % 100 == 0:
             print(f"  queried {i + 1}/{len(data)}")
 
+    # --- optional answer-accuracy arm (off by default) ----------------------
+    # Reports recall@k alongside answer-accuracy so a comparison with peers who
+    # publish the latter is like-for-like. The judge transport targets the local
+    # lightproxy; its deterministic core is tested separately.
+    aa = None
+    if answer_accuracy_cfg:
+        print("\nanswer-accuracy arm:")
+        if not answer_accuracy_cfg.get("answer_model") or \
+                not answer_accuracy_cfg.get("judge_model"):
+            raise SystemExit(
+                "--answer-accuracy requires --answer-model and --judge-model "
+                "(e.g. nous/deepseek/deepseek-v4.1-flash)"
+            )
+        try:
+            fetcher = answer_accuracy.fetcher_from_provider(provider, collection)
+            aa = answer_accuracy.evaluate(
+                examples=data,
+                retrieved_ids_per_example=retrieved_ids_per_example,
+                ranks=ranks,
+                fetcher=fetcher,
+                chat=answer_accuracy_cfg.get("chat")
+                or answer_accuracy.default_chat,
+                answer_model=answer_accuracy_cfg["answer_model"],
+                judge_model=answer_accuracy_cfg["judge_model"],
+                topn=SEARCH_LIMIT,
+            )
+        except Exception as e:
+            aa = {"enabled": True, "error": str(e),
+                  "note": ("answer-accuracy arm failed; recall metrics "
+                           "unchanged"), "rows": []}
+            print(f"answer-accuracy arm failed: {e}")
+
     report = {
         "harness_version": HARNESS_VERSION,
         "corpus": len(data),
@@ -304,6 +355,7 @@ def run(
         "latency_p95_ms": percentile(latencies, 95) if latencies else 0,
         "misses_count": len(miss_records),
         "misses": [(r["question"][:80], r["found_rank"]) for r in miss_records[:10]],
+        "answer_accuracy": aa,
     }
 
     print()
@@ -319,6 +371,18 @@ def run(
     print(f"  nDCG@5     {report['ndcg@5']:.3f}")
     print(f"  latency    mean {report['latency_mean_ms']:.1f} ms, "
           f"p95 {report['latency_p95_ms']:.1f} ms")
+    if aa and "error" not in aa:
+        print("\nanswer-accuracy (companion arm, recall@k unchanged):")
+        print(f"  judged          {aa['judged']}/{aa['n']}")
+        print(f"  answer_accuracy  {aa['answer_accuracy']:.3f}")
+        print(f"  exact_match      {aa['exact_match']:.3f}")
+        print(f"  recall_at_1      {aa['recall_at_1']:.3f} (retrieval, for reference)")
+        print(f"  models           gen={aa['answer_model']}  judge={aa['judge_model']}")
+        print(f"  note             {aa['note']}")
+        print("  (no number quoted: pilot scale < full corpus)")
+    if aa and "error" in aa:
+        print(f"\nanswer-accuracy arm failed: {aa['error']}")
+
     if miss_records:
         shown = len(report["misses"])
         print(f"\n  misses ({len(miss_records)} total, showing {shown}):")
@@ -363,6 +427,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="enable the trivial-message gate")
     parser.add_argument("--cascade", action="store_true",
                         help="enable the recall degradation cascade")
+    parser.add_argument("--answer-accuracy", action="store_true",
+                        help="run an opt-in answer-accuracy arm (LLM judge) "
+                             "alongside recall; needs --answer-model + --judge-model")
+    parser.add_argument("--answer-model", default=None,
+                        help="model for answer generation, e.g. "
+                             "nous/deepseek/deepseek-v4.1-flash")
+    parser.add_argument("--judge-model", default=None,
+                        help="model for the YES/NO judge")
     args = parser.parse_args(argv)
     knobs = {
         "temporal": args.temporal,
@@ -371,8 +443,15 @@ def main(argv: list[str] | None = None) -> int:
         "gate": args.gate,
         "cascade": args.cascade,
     }
+    aa_cfg = None
+    if args.answer_accuracy:
+        aa_cfg = {
+            "answer_model": args.answer_model,
+            "judge_model": args.judge_model,
+        }
     run(collection=args.collection, hybrid=args.hybrid,
-        misses_out=args.misses_out, keep=args.keep, knobs=knobs)
+        misses_out=args.misses_out, keep=args.keep, knobs=knobs,
+        answer_accuracy_cfg=aa_cfg)
     return 0
 
 
