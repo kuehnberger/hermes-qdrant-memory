@@ -1,5 +1,14 @@
 # Candidate B — BM25 Sparse Hybrid: Scope (2026-10-08)
 
+> **Baseline superseded (added 2026-11-22).** The dense-only figures below
+> (recall@5 0.228 / recall@10 0.278 / MRR 0.219 / nDCG@5 0.214) are the
+> 2026-10-08 numbers and are **no longer the yardstick**. The corrected,
+> re-baselined ablation is `docs/ABLATION.md` (LongMemEval-S, 500 questions,
+> harness `2.0.0-result-boundary`): dense recall@1 0.340 / @5 0.600 / @10 0.686,
+> MRR 0.449; hybrid 0.426 / 0.768. The "moves recall@10 materially above 0.278"
+> criterion is retained below as history only — the hybrid has since shipped and
+> is documented in `docs/HYBRID.md`.
+
 ## What it is
 Add a second, **sparse** vector to the qdrant-memory plugin so recall becomes
 dense + sparse fused, instead of dense-only. Sparse vectors carry exact-term
