@@ -59,7 +59,15 @@ this plugin, no new package.
 
 ## Measured
 
-**Method:** LongMemEval (`LIXINYI33/longmemeval-s`), one collection with all
+**Canonical result: `docs/ABLATION.md`.** On LongMemEval-S with 500 questions,
+dense recall@10 0.686 -> hybrid 0.768 (**+8.2 points**; recall@1 0.340 -> 0.426,
++8.6), reproduced on a freshly re-run harness. The ablation doc calls +8.2 "the
+number to publish". The n=1,000 table below is retained from the earlier
+`scripts/hybrid_eval.py` harness as provenance for the RRF/IDF decision — do not
+quote it as the plugin's headline gain, and do not mix its sample size with the
+ablation's.
+
+**Method (older harness):** LongMemEval (`LIXINYI33/longmemeval-s`), one collection with all
 three vectors, three query arms on the same questions; answer-hit as a
 substring of retrieved text; each example session-filtered. **Measured against
 the shipped schema** — `bm25` and `bm42` declared with `modifier: IDF`, exactly
@@ -92,8 +100,10 @@ Per-example win/loss vs dense (per 1,000 examples):
 
 **Honest limits of that table:**
 
-- The gain is modest but consistent: **+0.022–0.026 recall@10** (+5–6%
-  relative). bm25 is *near-additive at @10* — it wins 24 examples and loses
+- In that earlier harness the gain was modest but consistent: **+0.022–0.026
+  recall@10** (+5–6% relative). Use `docs/ABLATION.md`'s +8.2 instead when
+  quoting the plugin's measured hybrid gain. bm25 is *near-additive at @10* —
+  it wins 24 examples and loses
   only 2 (the 2 losses are the price of RRF re-ranking, and the same run
   measured them at zero before the IDF modifier was applied; treat the
   strict-additivity claim as withdrawn).

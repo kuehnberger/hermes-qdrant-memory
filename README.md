@@ -120,7 +120,10 @@ semantic one and fuses both rankings (RRF). Off by default. A fresh collection
 declares the sparse vector at creation; an existing dense-only store gets it
 added in place and its old points backfilled with one command
 (`python scripts/migrate_hybrid.py --collection hermes_memories --yes`).
-Measured gain, honest limits, and a re-runnable harness: **`docs/HYBRID.md`**.
+Canonical measured gain (+8.2 recall@10 points, 0.686 -> 0.768, LongMemEval-S
+n=500), honest limits, and a re-runnable harness: **`docs/ABLATION.md`**.
+The earlier n=1,000 harness numbers and the collection/IDF decision log are in
+**`docs/HYBRID.md`**.
 
 ## Optional: memory hardening (all default off)
 
