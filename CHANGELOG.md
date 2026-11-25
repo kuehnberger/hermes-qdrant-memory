@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Docs pointed readers at a superseded hybrid figure.** README's "Measured
+  gain" link went to `docs/HYBRID.md`, whose older n=1,000 harness publishes
+  +0.022–0.026 recall@10; `docs/ABLATION.md` measures +8.2 (0.686 -> 0.768,
+  n=500) and calls it the number to publish. README now points to ABLATION as
+  canonical, and HYBRID keeps the older table as labelled provenance.
 - **`sync_turn` stored an ISO-8601 `timestamp` while the historical backfill
   stored epoch floats.** Measured over 300 live points: 268 float, 28 missing,
   4 ISO — and the 4 were exactly this path's writes. Qdrant range filters
